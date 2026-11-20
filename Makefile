@@ -3,6 +3,8 @@ IVERILOG  := $(EDA_BIN)/iverilog
 VVP       := $(EDA_BIN)/vvp
 VERILATOR := $(EDA_BIN)/verilator
 YOSYS     := $(EDA_BIN)/yosys
+SBY       := $(EDA_BIN)/yowasp-sby
+ABC       := $(EDA_BIN)/yosys-abc
 PYTHON    := $(EDA_BIN)/python3
 
 RISCV_GCC     := /usr/bin/riscv64-unknown-elf-gcc
@@ -17,6 +19,7 @@ RTL_COMMON := rtl/common/alu.v rtl/common/branch_comp.v rtl/common/imm_gen.v \
 RTL_MEM    := rtl/mem/icache_2w.sv rtl/mem/dcache_nb.sv rtl/mem/mem_arb_2to1.sv \
               rtl/mem/main_memory_nb.sv rtl/mem/l2_bank.sv rtl/mem/l2_cache_shared.sv \
               rtl/mem/main_memory_dram.sv
+RTL_COH    := rtl/coherence/dcache_nb_coh.sv rtl/coherence/coh_interconnect.sv
 RTL_CORE   := rtl/core/instr_mem2w.sv rtl/core/regfile2w.sv rtl/core/btb_bht2w.sv \
               rtl/core/fetch2w.sv rtl/core/rat2w.sv rtl/core/rob2w.sv \
               rtl/core/rs_cluster2w.sv rtl/core/lsq2w.sv rtl/core/cdb_arbiter2w.sv \
@@ -31,13 +34,15 @@ V_BUILD := --binary --assert -Wall $(INC_FLAGS) -Wno-UNUSEDSIGNAL -Wno-UNUSEDPAR
 CFLAGS_BASE := -march=rv32ima -mabi=ilp32 -O2 -ffreestanding -nostdlib -nostartfiles \
                -Wall -Wextra -Isw/common -T sw/common/link.ld
 
-.PHONY: all lint-phase0 lint-phase1 lint-phase2 synth-phase0 synth-phase1 synth-phase2 \
-        test-phase0-unit test-phase1-unit test-phase2-unit test-phase0-asm \
-        test-phase0-c-build test-phase0-baseline test-phase1-v2 test-phase2-l2 clean
+.PHONY: all lint-phase0 lint-phase1 lint-phase2 lint-phase3 \
+        synth-phase0 synth-phase1 synth-phase2 synth-phase3 \
+        test-phase0-unit test-phase1-unit test-phase2-unit test-phase3-unit formal-phase3 \
+        test-phase0-asm test-phase0-c-build test-phase0-baseline test-phase1-v2 test-phase2-l2 clean
 
-all: lint-phase0 lint-phase1 lint-phase2 synth-phase0 synth-phase1 synth-phase2 \
-     test-phase0-unit test-phase1-unit test-phase2-unit test-phase0-asm \
-     test-phase0-c-build test-phase0-baseline test-phase1-v2 test-phase2-l2
+all: lint-phase0 lint-phase1 lint-phase2 lint-phase3 \
+     synth-phase0 synth-phase1 synth-phase2 synth-phase3 \
+     test-phase0-unit test-phase1-unit test-phase2-unit test-phase3-unit formal-phase3 \
+     test-phase0-asm test-phase0-c-build test-phase0-baseline test-phase1-v2 test-phase2-l2
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -65,6 +70,11 @@ lint-phase2:
 	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_LINT) --top-module clint_mmio rtl/soc/clint_mmio.sv
 	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_LINT) --top-module single_ooo2w_soc $(RTL_COMMON) $(RTL_MEM) $(RTL_CORE) $(RTL_P2_SOC)
 
+lint-phase3:
+	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_LINT) --top-module dcache_nb_coh rtl/coherence/dcache_nb_coh.sv
+	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_LINT) --top-module coh_interconnect rtl/coherence/coh_interconnect.sv
+	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_LINT) --top-module coh_checker tb/unit/coh_checker.sv
+
 synth-phase0:
 	$(YOSYS) -q -p "read_verilog -sv $(INC_FLAGS) rtl/common/decoder.sv; hierarchy -check -top decoder; proc; opt; check -assert"
 	$(YOSYS) -q -p "read_verilog -sv $(INC_FLAGS) rtl/core/csr_unit.sv; hierarchy -check -top csr_unit; proc; opt; check -assert"
@@ -82,6 +92,11 @@ synth-phase2:
 	$(YOSYS) -q -p "read_verilog -sv $(INC_FLAGS) rtl/mem/l2_bank.sv rtl/mem/l2_cache_shared.sv; hierarchy -check -top l2_cache_shared -chparam SETS_PER_BANK 8; proc; opt; check -assert"
 	$(YOSYS) -q -p "read_verilog -sv $(INC_FLAGS) rtl/soc/clint_mmio.sv; hierarchy -check -top clint_mmio; proc; opt; check -assert"
 	@echo "PASS [synth-phase2]: Yosys check -assert passed on l2_bank, l2_cache_shared & clint_mmio (0 latches, 0 errors)"
+
+synth-phase3:
+	$(YOSYS) -q -p "read_verilog -sv $(INC_FLAGS) rtl/coherence/dcache_nb_coh.sv; hierarchy -check -top dcache_nb_coh -chparam NUM_SETS 8; proc; opt; check -assert"
+	$(YOSYS) -q -p "read_verilog -sv $(INC_FLAGS) rtl/coherence/coh_interconnect.sv; hierarchy -check -top coh_interconnect; proc; opt; check -assert"
+	@echo "PASS [synth-phase3]: Yosys check -assert passed on dcache_nb_coh & coh_interconnect (0 latches, 0 errors)"
 
 # ----------------------------------------------------------------------------
 # Unit Testbenches (Verilator + Icarus Verilog)
@@ -123,6 +138,20 @@ test-phase2-unit: $(BUILD_DIR)
 	$(VVP) $(BUILD_DIR)/tb_l2_cache_shared.vvp
 	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_BUILD) --Mdir $(BUILD_DIR)/v_tb_l2 -o Vtb_l2 --top-module tb_l2_cache_shared rtl/mem/l2_bank.sv rtl/mem/l2_cache_shared.sv rtl/mem/main_memory_dram.sv tb/unit/tb_l2_cache_shared.sv
 	$(BUILD_DIR)/v_tb_l2/Vtb_l2
+
+test-phase3-unit: $(BUILD_DIR)
+	# 1. MOESI (ENABLE_MOESI_O=1) 50,000-op Dual-Cache Coherence Stress (Verilator --assert)
+	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_BUILD) -GENABLE_MOESI_O=1 -GNUM_RAND_OPS=50000 --Mdir $(BUILD_DIR)/v_tb_coh_moesi -o Vtb_coh_moesi --top-module tb_coh_subsystem $(RTL_COH) rtl/mem/l2_bank.sv rtl/mem/l2_cache_shared.sv rtl/mem/main_memory_dram.sv tb/unit/coh_checker.sv tb/unit/tb_coh_subsystem.sv
+	$(BUILD_DIR)/v_tb_coh_moesi/Vtb_coh_moesi
+	# 2. MESI Ablation (ENABLE_MOESI_O=0) 50,000-op Dual-Cache Stress (Verilator --assert)
+	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_BUILD) -GENABLE_MOESI_O=0 -GNUM_RAND_OPS=50000 --Mdir $(BUILD_DIR)/v_tb_coh_mesi -o Vtb_coh_mesi --top-module tb_coh_subsystem $(RTL_COH) rtl/mem/l2_bank.sv rtl/mem/l2_cache_shared.sv rtl/mem/main_memory_dram.sv tb/unit/coh_checker.sv tb/unit/tb_coh_subsystem.sv
+	$(BUILD_DIR)/v_tb_coh_mesi/Vtb_coh_mesi
+	# 3. Icarus Verilog Dual-Simulator Cross-Check (5,000 ops MOESI)
+	$(IVERILOG) -g2012 $(INC_FLAGS) -Ptb_coh_subsystem.NUM_RAND_OPS=5000 -o $(BUILD_DIR)/tb_coh_subsystem.vvp $(RTL_COH) rtl/mem/l2_bank.sv rtl/mem/l2_cache_shared.sv rtl/mem/main_memory_dram.sv tb/unit/coh_checker.sv tb/unit/tb_coh_subsystem.sv
+	$(VVP) $(BUILD_DIR)/tb_coh_subsystem.vvp
+
+formal-phase3: $(BUILD_DIR)
+	PATH=$(EDA_BIN):/usr/bin:/bin $(SBY) -f --yosys $(YOSYS) --abc $(ABC) --prefix $(BUILD_DIR)/formal_coh tb/formal/coh_formal.sby
 
 # ----------------------------------------------------------------------------
 # Phase 0, Phase 1 & Phase 2 End-to-End Suites

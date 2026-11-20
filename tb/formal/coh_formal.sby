@@ -1,0 +1,29 @@
+[tasks]
+pdr_swmr
+bmc_full
+
+[options]
+pdr_swmr: mode prove
+pdr_swmr: aigsmt none
+
+bmc_full: mode bmc
+bmc_full: depth 14
+bmc_full: aigsmt none
+
+[engines]
+pdr_swmr: abc pdr
+bmc_full: abc bmc3
+
+[script]
+read -formal -sv -I. dcache_nb_coh.sv coh_interconnect.sv coh_formal.sv
+pdr_swmr: chparam -set CHECK_DATA 0 coh_formal
+bmc_full: chparam -set CHECK_DATA 1 coh_formal
+prep -top coh_formal
+opt -full
+
+[files]
+rtl/common/rv32ima_defs.vh
+rtl/coherence/coh_defs.vh
+rtl/coherence/dcache_nb_coh.sv
+rtl/coherence/coh_interconnect.sv
+tb/formal/coh_formal.sv
