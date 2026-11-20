@@ -93,6 +93,7 @@ module lsq2w #(
     output wire                 dc_req_valid,
     input  wire                 dc_req_ready,
     output wire                 dc_req_is_write,
+    output wire                 dc_req_is_mmio,
     output wire [3:0]           dc_req_amo_op,
     output wire [AWIDTH-1:0]    dc_req_addr,
     output wire [31:0]          dc_req_wdata,
@@ -434,7 +435,11 @@ always @(*) begin
             end
 
             if (!l_blocked) begin
-                if (l_stlf_hit) begin
+                if (lq_addr_eff[li1][31:24] == 8'h02) begin
+                    // Uncached CLINT MMIO load: strictly non-speculative at ROB head after SQ drain!
+                    if ((lq_rob_tag[li1] == rob_head) && !sq_has_comm_drn && dc_writes_idle)
+                        lq_can_cache[li1] = 1'b1;
+                end else if (l_stlf_hit) begin
                     lq_can_stlf[li1]  = 1'b1;
                     lq_stlf_data[li1] = format_load_data(lq_size[li1], lq_uns[li1], lq_addr_eff[li1][1:0], l_stlf_word);
                 end else begin
@@ -494,6 +499,9 @@ wire dc_start_load  = !sq_has_comm_drn && !dc_start_amo && !amo_in_flight &&
 
 assign dc_req_valid    = dc_start_store || dc_start_amo || dc_start_load;
 assign dc_req_is_write = dc_start_store || (dc_start_amo && (amo_req_op != AMO_LR));
+assign dc_req_is_mmio  = dc_start_store ? (sq_addr_eff[sq_head_idx][31:24] == 8'h02) :
+                         dc_start_amo   ? (amo_req_addr[31:24] == 8'h02)             :
+                                          (lq_addr_eff[cache_ld_pick_idx][31:24] == 8'h02);
 assign dc_req_amo_op   = dc_start_amo ? amo_req_op : AMO_NONE;
 assign dc_req_addr     = dc_start_store ? sq_addr_eff[sq_head_idx][AWIDTH-1:0] :
                          dc_start_amo   ? amo_req_addr[AWIDTH-1:0]             :

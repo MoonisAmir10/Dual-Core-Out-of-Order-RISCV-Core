@@ -31,10 +31,11 @@ module ooo2w_core #(
     output wire                ic_flush,
     output wire                ic_invalidate_all,
 
-    // Split-Transaction Non-Blocking D-Cache Interface (with RV32A Atomics + FENCE.I)
+    // Split-Transaction Non-Blocking D-Cache Interface (with RV32A Atomics + FENCE.I + MMIO)
     output wire                dc_req_valid,
     input  wire                dc_req_ready,
     output wire                dc_req_is_write,
+    output wire                dc_req_is_mmio,
     output wire [3:0]          dc_req_amo_op,
     output wire [AWIDTH-1:0]   dc_req_addr,
     output wire [31:0]         dc_req_wdata,
@@ -1091,7 +1092,8 @@ lsq2w #(
     .lsu_cdb_mem_we(lsu_out_mem_we), .lsu_cdb_mem_addr(lsu_out_mem_addr),
     .lsu_cdb_mem_wstrb(lsu_out_mem_wstrb), .lsu_cdb_mem_wdata(lsu_out_mem_wdata),
     .dc_req_valid(dc_req_valid), .dc_req_ready(dc_req_ready),
-    .dc_req_is_write(dc_req_is_write), .dc_req_amo_op(dc_req_amo_op),
+    .dc_req_is_write(dc_req_is_write), .dc_req_is_mmio(dc_req_is_mmio),
+    .dc_req_amo_op(dc_req_amo_op),
     .dc_req_addr(dc_req_addr), .dc_req_wdata(dc_req_wdata), .dc_req_wstrb(dc_req_wstrb),
     .dc_req_id(dc_req_id), .dc_req_rob_tag(dc_req_rob_tag),
     .dc_hit_valid(dc_hit_valid), .dc_hit_id(dc_hit_id), .dc_hit_rdata(dc_hit_rdata),

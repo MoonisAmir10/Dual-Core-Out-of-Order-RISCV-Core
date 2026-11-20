@@ -91,7 +91,7 @@ module ooo2w_soc #(
 wire [31:0]  imem_pc0, imem_instr0, imem_pc1, imem_instr1;
 wire         imem_req_u, ic_flush_u, ic_inv_u;
 
-wire         dc_req_valid, dc_req_ready, dc_req_is_write;
+wire         dc_req_valid, dc_req_ready, dc_req_is_write, dc_req_mmio_u;
 wire [3:0]   dc_req_amo_op;
 wire [15:0]  dc_req_addr;
 wire [31:0]  dc_req_wdata;
@@ -145,7 +145,8 @@ ooo2w_core #(
     .imem_pc1(imem_pc1), .imem_valid1(1'b1), .imem_instr1(imem_instr1),
     .ic_flush(ic_flush_u), .ic_invalidate_all(ic_inv_u),
     .dc_req_valid(dc_req_valid), .dc_req_ready(dc_req_ready),
-    .dc_req_is_write(dc_req_is_write), .dc_req_amo_op(dc_req_amo_op),
+    .dc_req_is_write(dc_req_is_write), .dc_req_is_mmio(dc_req_mmio_u),
+    .dc_req_amo_op(dc_req_amo_op),
     .dc_req_addr(dc_req_addr), .dc_req_wdata(dc_req_wdata), .dc_req_wstrb(dc_req_wstrb),
     .dc_req_id(dc_req_id), .dc_req_rob_tag(dc_req_rob_tag),
     .dc_hit_valid(dc_hit_valid), .dc_hit_id(dc_hit_id), .dc_hit_rdata(dc_hit_rdata),

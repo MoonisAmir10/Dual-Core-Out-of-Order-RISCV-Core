@@ -47,7 +47,7 @@ wire [TAG_W-1:0]    lsu_cdb_tag;
 wire [31:0]         lsu_cdb_seq, lsu_cdb_val, lsu_cdb_mem_addr, lsu_cdb_mem_wdata;
 wire [3:0]          lsu_cdb_mem_wstrb;
 
-wire                dc_req_valid, dc_req_is_write;
+wire                dc_req_valid, dc_req_is_write, dc_req_is_mmio;
 reg                 dc_req_ready;
 wire [3:0]          dc_req_amo_op;
 wire [AWIDTH-1:0]   dc_req_addr;
@@ -94,7 +94,8 @@ lsq2w #(
     .lsu_cdb_mem_we(lsu_cdb_mem_we), .lsu_cdb_mem_addr(lsu_cdb_mem_addr),
     .lsu_cdb_mem_wstrb(lsu_cdb_mem_wstrb), .lsu_cdb_mem_wdata(lsu_cdb_mem_wdata),
     .dc_req_valid(dc_req_valid), .dc_req_ready(dc_req_ready),
-    .dc_req_is_write(dc_req_is_write), .dc_req_amo_op(dc_req_amo_op),
+    .dc_req_is_write(dc_req_is_write), .dc_req_is_mmio(dc_req_is_mmio),
+    .dc_req_amo_op(dc_req_amo_op),
     .dc_req_addr(dc_req_addr), .dc_req_wdata(dc_req_wdata), .dc_req_wstrb(dc_req_wstrb),
     .dc_req_id(dc_req_id), .dc_req_rob_tag(dc_req_rob_tag),
     .dc_hit_valid(dc_hit_valid), .dc_hit_id(dc_hit_id), .dc_hit_rdata(dc_hit_rdata),
