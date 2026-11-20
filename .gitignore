@@ -1,0 +1,17 @@
+# Build & simulation artifacts
+build/
+*.vcd
+*.fst
+*.log
+*.out
+*.o
+*.elf
+*.bin
+*.dump
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Local planning documents
+implementation_plan.md
+upgrade_plan.md
