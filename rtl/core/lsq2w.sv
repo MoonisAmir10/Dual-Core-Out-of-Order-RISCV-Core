@@ -349,8 +349,12 @@ always @(*) begin
     lq_head1_replay  = 1'b0;
     for (sni = 0; sni < LQ_DEPTH; sni = sni + 1) begin
         if (lq_valid[sni] && !lq_from_stlf[sni]) begin
-            // Detect snoop match on any load that has received data (or is receiving right now)
+            // Detect snoop match on any SPECULATIVE load (lq_rob_tag != rob_head) that has
+            // received data (or is receiving right now). Exempting an unpoisoned load that is
+            // already at rob_head guarantees forward progress (zero false-sharing livelock under
+            // tight peer AMOSWAP loops) while preserving 100% RVWMO/CoRR replay on all speculative loads!
             if (coh_snoop_inv_valid &&
+                (lq_rob_tag[sni] != rob_head) &&
                 (lq_addr_eff[sni][AWIDTH-1:4] == coh_snoop_inv_line) &&
                 (lq_done[sni] || lq_cdb_sent[sni] ||
                  (lq_issued[sni] && dc_hit_valid  && !dc_hit_is_amo  && (hit_idx  == sni[2:0]) && (hit_gen  == lq_gen[sni])) ||
