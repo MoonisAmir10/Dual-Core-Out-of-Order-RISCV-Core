@@ -27,6 +27,7 @@ RTL_CORE   := rtl/core/instr_mem2w.sv rtl/core/regfile2w.sv rtl/core/btb_bht2w.s
 RTL_SOC    := rtl/soc/ooo2w_soc.sv
 RTL_P1_SOC := rtl/soc/single_ooo2w_p1_soc.sv
 RTL_P2_SOC := rtl/soc/clint_mmio.sv rtl/soc/single_ooo2w_soc.sv
+RTL_P4_SOC := rtl/soc/clint_mmio.sv rtl/soc/dual_ooo2w_soc.sv
 
 V_LINT  := --lint-only -Wall $(INC_FLAGS) -Wno-UNUSEDSIGNAL -Wno-UNUSEDPARAM
 V_BUILD := --binary --assert -Wall $(INC_FLAGS) -Wno-UNUSEDSIGNAL -Wno-UNUSEDPARAM -Wno-DECLFILENAME --timescale 1ns/1ps -j 8
@@ -34,15 +35,17 @@ V_BUILD := --binary --assert -Wall $(INC_FLAGS) -Wno-UNUSEDSIGNAL -Wno-UNUSEDPAR
 CFLAGS_BASE := -march=rv32ima -mabi=ilp32 -O2 -ffreestanding -nostdlib -nostartfiles \
                -Wall -Wextra -Isw/common -T sw/common/link.ld
 
-.PHONY: all lint-phase0 lint-phase1 lint-phase2 lint-phase3 \
-        synth-phase0 synth-phase1 synth-phase2 synth-phase3 \
+.PHONY: all lint-phase0 lint-phase1 lint-phase2 lint-phase3 lint-phase4 \
+        synth-phase0 synth-phase1 synth-phase2 synth-phase3 synth-phase4 \
         test-phase0-unit test-phase1-unit test-phase2-unit test-phase3-unit formal-phase3 \
-        test-phase0-asm test-phase0-c-build test-phase0-baseline test-phase1-v2 test-phase2-l2 clean
+        test-phase0-asm test-phase0-c-build test-phase0-baseline test-phase1-v2 test-phase2-l2 \
+        test-phase4-litmus clean
 
-all: lint-phase0 lint-phase1 lint-phase2 lint-phase3 \
-     synth-phase0 synth-phase1 synth-phase2 synth-phase3 \
+all: lint-phase0 lint-phase1 lint-phase2 lint-phase3 lint-phase4 \
+     synth-phase0 synth-phase1 synth-phase2 synth-phase3 synth-phase4 \
      test-phase0-unit test-phase1-unit test-phase2-unit test-phase3-unit formal-phase3 \
-     test-phase0-asm test-phase0-c-build test-phase0-baseline test-phase1-v2 test-phase2-l2
+     test-phase0-asm test-phase0-c-build test-phase0-baseline test-phase1-v2 test-phase2-l2 \
+     test-phase4-litmus
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -75,6 +78,9 @@ lint-phase3:
 	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_LINT) --top-module coh_interconnect rtl/coherence/coh_interconnect.sv
 	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_LINT) --top-module coh_checker tb/unit/coh_checker.sv
 
+lint-phase4:
+	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_LINT) --top-module dual_ooo2w_soc $(RTL_COMMON) $(RTL_MEM) $(RTL_COH) $(RTL_CORE) $(RTL_P4_SOC)
+
 synth-phase0:
 	$(YOSYS) -q -p "read_verilog -sv $(INC_FLAGS) rtl/common/decoder.sv; hierarchy -check -top decoder; proc; opt; check -assert"
 	$(YOSYS) -q -p "read_verilog -sv $(INC_FLAGS) rtl/core/csr_unit.sv; hierarchy -check -top csr_unit; proc; opt; check -assert"
@@ -97,6 +103,10 @@ synth-phase3:
 	$(YOSYS) -q -p "read_verilog -sv $(INC_FLAGS) rtl/coherence/dcache_nb_coh.sv; hierarchy -check -top dcache_nb_coh -chparam NUM_SETS 8; proc; opt; check -assert"
 	$(YOSYS) -q -p "read_verilog -sv $(INC_FLAGS) rtl/coherence/coh_interconnect.sv; hierarchy -check -top coh_interconnect; proc; opt; check -assert"
 	@echo "PASS [synth-phase3]: Yosys check -assert passed on dcache_nb_coh & coh_interconnect (0 latches, 0 errors)"
+
+synth-phase4:
+	$(YOSYS) -q -p "read_verilog -sv $(INC_FLAGS) $(RTL_COMMON) $(RTL_MEM) $(RTL_COH) $(RTL_CORE) $(RTL_P4_SOC); hierarchy -check -top dual_ooo2w_soc -chparam ICACHE_SETS 8 -chparam DCACHE_SETS 8 -chparam L2_SETS_BANK 8 -chparam DRAM_LINE_BITS 4; proc; opt; check -assert"
+	@echo "PASS [synth-phase4]: Yosys check -assert passed on full dual_ooo2w_soc (0 latches, 0 errors)"
 
 # ----------------------------------------------------------------------------
 # Unit Testbenches (Verilator + Icarus Verilog)
@@ -187,6 +197,11 @@ test-phase2-l2: $(BUILD_DIR) test-phase0-c-build
 	@test -x $(BUILD_DIR)/v_p1_pf_l16/Vp1_pf_l16 || \
 	  PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_BUILD) -GCORE_ID=0 -GMEM_LATENCY=16 -GENABLE_PREFETCH=1 --Mdir $(BUILD_DIR)/v_p1_pf_l16 -o Vp1_pf_l16 --top-module tb_single_ooo2w_p1_soc $(RTL_COMMON) $(RTL_MEM) $(RTL_CORE) $(RTL_P1_SOC) tb/common/ooo_trace_mon2w.sv tb/soc/tb_single_ooo2w_p1_soc.sv
 	$(PYTHON) scripts/test_phase2_l2.py
+
+test-phase4-litmus: $(BUILD_DIR)
+	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_BUILD) -GDRAM_LATENCY=16 -GL2_HIT_LAT=3 -GENABLE_PREFETCH=1 -GENABLE_MOESI_O=1 -GENABLE_SNOOP_REPLAY=1 --Mdir $(BUILD_DIR)/v_dual_soc -o Vdual_soc --top-module tb_dual_ooo2w_soc $(RTL_COMMON) $(RTL_MEM) $(RTL_COH) $(RTL_CORE) $(RTL_P4_SOC) tb/unit/coh_checker.sv tb/soc/tb_dual_ooo2w_soc.sv
+	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_BUILD) -GDRAM_LATENCY=16 -GL2_HIT_LAT=3 -GENABLE_PREFETCH=1 -GENABLE_MOESI_O=1 -GENABLE_SNOOP_REPLAY=0 --Mdir $(BUILD_DIR)/v_dual_soc_noreplay -o Vdual_soc_noreplay --top-module tb_dual_ooo2w_soc $(RTL_COMMON) $(RTL_MEM) $(RTL_COH) $(RTL_CORE) $(RTL_P4_SOC) tb/unit/coh_checker.sv tb/soc/tb_dual_ooo2w_soc.sv
+	$(PYTHON) scripts/test_litmus_rvwmo.py
 
 clean:
 	rm -rf $(BUILD_DIR)
