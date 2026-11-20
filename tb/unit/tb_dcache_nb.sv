@@ -43,7 +43,7 @@ wire        mem_wr_valid, mem_wr_ready;
 wire [11:0] mem_wr_line_addr;
 wire [127:0] mem_wr_data;
 
-wire        dcache_idle, dcache_writes_idle, dcache_any_miss;
+wire        dcache_idle, dcache_writes_idle, dcache_any_miss, clean_all_done_u;
 wire        cache_hit, cache_miss, cache_wb, cache_hum, cache_mum_cyc, cache_mshr_coalesce;
 
 dcache_nb #(
@@ -53,12 +53,14 @@ dcache_nb #(
     .ID_W(6)
 ) u_dut (
     .clk(clk), .reset_n(reset_n),
-    .req_valid(req_valid), .req_ready(req_ready), .req_is_write(req_is_write),
+    .req_valid(req_valid), .req_ready(req_ready), .req_is_write(req_is_write), .req_amo_op(4'd0),
     .req_addr(req_addr), .req_wdata(req_wdata), .req_wstrb(req_wstrb),
     .req_id(req_id), .req_rob_tag(req_rob_tag),
     .hit_resp_valid(hit_resp_valid), .hit_resp_id(hit_resp_id), .hit_resp_rdata(hit_resp_rdata),
     .fill_resp_valid(fill_resp_valid), .fill_resp_id(fill_resp_id), .fill_resp_rdata(fill_resp_rdata),
     .flush(flush), .squash_valid(squash_valid), .squash_tag(squash_tag), .rob_head(rob_head),
+    .clean_all_req(1'b0), .clean_all_done(clean_all_done_u),
+    .ext_resv_inv_valid(1'b0), .ext_resv_inv_laddr(12'd0),
     .mem_rd_valid(mem_rd_valid), .mem_rd_ready(mem_rd_ready),
     .mem_rd_line_addr(mem_rd_line_addr), .mem_rd_id(mem_rd_id),
     .mem_rresp_valid(mem_rresp_valid), .mem_rresp_id(mem_rresp_id), .mem_rresp_data(mem_rresp_data),

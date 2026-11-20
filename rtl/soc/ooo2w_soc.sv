@@ -89,19 +89,22 @@ module ooo2w_soc #(
 );
 
 wire [31:0]  imem_pc0, imem_instr0, imem_pc1, imem_instr1;
+wire         imem_req_u, ic_flush_u, ic_inv_u;
 
 wire         dc_req_valid, dc_req_ready, dc_req_is_write;
+wire [3:0]   dc_req_amo_op;
 wire [15:0]  dc_req_addr;
 wire [31:0]  dc_req_wdata;
 wire [3:0]   dc_req_wstrb;
-wire [5:0]   dc_req_id;
+wire [6:0]   dc_req_id;
 wire [4:0]   dc_req_rob_tag;
 
 wire         dc_hit_valid, dc_fill_valid;
-wire [5:0]   dc_hit_id, dc_fill_id;
+wire [6:0]   dc_hit_id, dc_fill_id;
 wire [31:0]  dc_hit_rdata, dc_fill_rdata;
 
-wire         dc_squash_valid, dc_idle_u, dc_writes_idle, dc_any_miss;
+wire         dc_flush, dc_squash_valid, dc_clean_req, dc_clean_done;
+wire         dc_idle_u, dc_writes_idle, dc_any_miss;
 wire [4:0]   dc_squash_tag, dc_rob_head;
 
 wire         dcache_hit, dcache_miss, dcache_wb, dcache_hum, dcache_mum_cyc, dcache_coalesce;
@@ -117,6 +120,7 @@ wire [127:0] mem_wr_data;
 wire         stat_rob_full, stat_rs_full, stat_lsq_full, stat_cp_full;
 wire         stat_stlf_hit, stat_br_fast_squash, stat_div_ovl, stat_dcm_ovl;
 wire         stat_dual_disp, stat_dual_cdb, stat_dual_commit;
+wire         stat_replay_u, stat_amo_u, stat_fence_u;
 wire [1:0]   stat_br_total_cnt, stat_br_mispred_cnt, stat_war_waw_cnt;
 wire [3:0]   stat_ex_byp_cnt;
 wire [1:0]   stat_ras_pred_cnt, stat_ras_mispred_cnt;
@@ -129,17 +133,28 @@ instr_mem2w #(
     .pc1(imem_pc1), .instr1(imem_instr1)
 );
 
-ooo2w_core u_core (
+ooo2w_core #(
+    .CORE_ID(32'd0),
+    .RESET_PC(32'd0),
+    .AWIDTH(16),
+    .ID_W(7)
+) u_core (
     .clk(clk), .reset_n(reset_n),
-    .imem_pc0(imem_pc0), .imem_instr0(imem_instr0),
-    .imem_pc1(imem_pc1), .imem_instr1(imem_instr1),
-    .dc_req_valid(dc_req_valid), .dc_req_ready(dc_req_ready), .dc_req_is_write(dc_req_is_write),
+    .imem_req_valid(imem_req_u),
+    .imem_pc0(imem_pc0), .imem_valid0(1'b1), .imem_instr0(imem_instr0),
+    .imem_pc1(imem_pc1), .imem_valid1(1'b1), .imem_instr1(imem_instr1),
+    .ic_flush(ic_flush_u), .ic_invalidate_all(ic_inv_u),
+    .dc_req_valid(dc_req_valid), .dc_req_ready(dc_req_ready),
+    .dc_req_is_write(dc_req_is_write), .dc_req_amo_op(dc_req_amo_op),
     .dc_req_addr(dc_req_addr), .dc_req_wdata(dc_req_wdata), .dc_req_wstrb(dc_req_wstrb),
     .dc_req_id(dc_req_id), .dc_req_rob_tag(dc_req_rob_tag),
     .dc_hit_valid(dc_hit_valid), .dc_hit_id(dc_hit_id), .dc_hit_rdata(dc_hit_rdata),
     .dc_fill_valid(dc_fill_valid), .dc_fill_id(dc_fill_id), .dc_fill_rdata(dc_fill_rdata),
-    .dc_squash_valid(dc_squash_valid), .dc_squash_tag(dc_squash_tag), .dc_rob_head(dc_rob_head),
+    .dc_flush(dc_flush), .dc_squash_valid(dc_squash_valid),
+    .dc_squash_tag(dc_squash_tag), .dc_rob_head(dc_rob_head),
+    .dc_clean_all_req(dc_clean_req), .dc_clean_all_done(dc_clean_done),
     .dc_writes_idle(dc_writes_idle), .dc_any_miss(dc_any_miss),
+    .coh_snoop_inv_valid(1'b0), .coh_snoop_inv_line(12'd0),
     .commit0_valid(commit0_valid), .commit0_seq_id(commit0_seq_id),
     .commit0_pc(commit0_pc), .commit0_instr(commit0_instr),
     .commit0_rd_we(commit0_rd_we), .commit0_rd_addr(commit0_rd_addr), .commit0_rd_wdata(commit0_rd_wdata),
@@ -166,22 +181,26 @@ ooo2w_core u_core (
     .stat_dcache_miss_overlap_cyc(stat_dcm_ovl), .stat_dual_disp(stat_dual_disp),
     .stat_dual_cdb(stat_dual_cdb), .stat_dual_commit(stat_dual_commit),
     .stat_ex_byp_cnt(stat_ex_byp_cnt),
-    .stat_ras_pred_cnt(stat_ras_pred_cnt), .stat_ras_mispred_cnt(stat_ras_mispred_cnt)
+    .stat_ras_pred_cnt(stat_ras_pred_cnt), .stat_ras_mispred_cnt(stat_ras_mispred_cnt),
+    .stat_replay_flush(stat_replay_u), .stat_amo_commit(stat_amo_u), .stat_fence_commit(stat_fence_u)
 );
 
 dcache_nb #(
     .AWIDTH(16),
     .NUM_SETS(DCACHE_SETS),
     .TAG_W(5),
-    .ID_W(6)
+    .ID_W(7)
 ) u_dcache (
     .clk(clk), .reset_n(reset_n),
-    .req_valid(dc_req_valid), .req_ready(dc_req_ready), .req_is_write(dc_req_is_write),
+    .req_valid(dc_req_valid), .req_ready(dc_req_ready),
+    .req_is_write(dc_req_is_write), .req_amo_op(dc_req_amo_op),
     .req_addr(dc_req_addr), .req_wdata(dc_req_wdata), .req_wstrb(dc_req_wstrb),
     .req_id(dc_req_id), .req_rob_tag(dc_req_rob_tag),
     .hit_resp_valid(dc_hit_valid), .hit_resp_id(dc_hit_id), .hit_resp_rdata(dc_hit_rdata),
     .fill_resp_valid(dc_fill_valid), .fill_resp_id(dc_fill_id), .fill_resp_rdata(dc_fill_rdata),
-    .flush(1'b0), .squash_valid(dc_squash_valid), .squash_tag(dc_squash_tag), .rob_head(dc_rob_head),
+    .flush(dc_flush), .squash_valid(dc_squash_valid), .squash_tag(dc_squash_tag), .rob_head(dc_rob_head),
+    .clean_all_req(dc_clean_req), .clean_all_done(dc_clean_done),
+    .ext_resv_inv_valid(1'b0), .ext_resv_inv_laddr(12'd0),
     .mem_rd_valid(mem_rd_valid), .mem_rd_ready(mem_rd_ready),
     .mem_rd_line_addr(mem_rd_line_addr), .mem_rd_id(mem_rd_id),
     .mem_rresp_valid(mem_rresp_valid), .mem_rresp_id(mem_rresp_id), .mem_rresp_data(mem_rresp_data),

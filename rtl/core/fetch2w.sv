@@ -2,25 +2,30 @@
 
 // ============================================================================
 // 2-Wide Superscalar Front-End Fetch Unit with 8-Entry Circular Fetch Queue
-// (Upgrade U2: passes pre-decoded instructions & enqueue fires to GSHARE+RAS
-//  predictor and carries per-instruction pred_ghr & pred_used_ras metadata!)
+// (Phase 1: Stall-capable L1 I-Cache handshake + line-boundary 1-instr fetch +
+//  parameterizable RESET_PC for unified dual-core boot!)
 // ============================================================================
-module fetch2w (
+module fetch2w #(
+    parameter [31:0] RESET_PC = 32'd0
+) (
     input  wire        clk,
     input  wire        reset_n,
     input  wire        halted,
 
-    // Mispredict redirect & flush
+    // Mispredict / Replay / FENCE.I redirect & flush
     input  wire        flush,
     input  wire [31:0] flush_target_pc,
 
-    // Dual-port instruction memory interface
+    // L1 I-Cache / Dual-port instruction memory handshake
+    output wire        imem_req_valid,
     output wire [31:0] imem_pc0,
+    input  wire        imem_valid0,
     input  wire [31:0] imem_instr0,
     output wire [31:0] imem_pc1,
+    input  wire        imem_valid1,
     input  wire [31:0] imem_instr1,
 
-    // Dual-lookup branch predictor interface (GSHARE + 8-entry RAS + BTB)
+    // Dual-lookup branch predictor interface (Tournament GSHARE + 8-RAS + BTB)
     output wire [31:0] pred_req_pc0,
     output wire [31:0] pred_req_instr0,
     input  wire        pred_taken0,
@@ -89,12 +94,13 @@ wire [31:0] pc_plus4 = pc_r + 32'd4;
 wire [2:0]  fq_head1 = fq_head + 3'd1;
 wire [2:0]  fq_tail1 = fq_tail + 3'd1;
 
+assign imem_req_valid  = !flush && !halted && !ebreak_seen && (fq_cnt <= 4'd7);
 assign imem_pc0        = pc_r;
 assign imem_pc1        = pc_plus4;
 assign pred_req_pc0    = pc_r;
-assign pred_req_instr0 = imem_instr0;
+assign pred_req_instr0 = imem_valid0 ? imem_instr0 : INSTR_NOP;
 assign pred_req_pc1    = pc_plus4;
-assign pred_req_instr1 = imem_instr1;
+assign pred_req_instr1 = imem_valid1 ? imem_instr1 : INSTR_NOP;
 
 assign out0_valid         = (fq_cnt >= 4'd1) && !flush && !halted;
 assign out0_pc            = fq_pc[fq_head];
@@ -116,10 +122,10 @@ assign out1_pred_used_ras = fq_puras[fq_head1];
 assign out1_pred_bim      = fq_pbim[fq_head1];
 assign out1_pred_gsh      = fq_pgsh[fq_head1];
 
-wire can_fetch   = !flush && !halted && !ebreak_seen;
+wire can_fetch   = !flush && !halted && !ebreak_seen && imem_valid0;
 wire slot0_ebrk  = (imem_instr0 == INSTR_EBREAK);
 wire slot1_ebrk  = (imem_instr1 == INSTR_EBREAK);
-wire can_enq2    = can_fetch && (fq_cnt <= 4'd6) && !slot0_ebrk && !pred_taken0;
+wire can_enq2    = can_fetch && imem_valid1 && (fq_cnt <= 4'd6) && !slot0_ebrk && !pred_taken0;
 wire can_enq1    = can_fetch && (fq_cnt <= 4'd7) && !can_enq2;
 
 assign enq0_fire = can_enq1 || can_enq2;
@@ -134,7 +140,7 @@ integer i;
 
 always @(posedge clk or negedge reset_n) begin
     if (!reset_n) begin
-        pc_r        <= 32'd0;
+        pc_r        <= RESET_PC;
         ebreak_seen <= 1'b0;
         fq_head     <= 3'd0;
         fq_tail     <= 3'd0;
