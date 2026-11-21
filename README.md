@@ -19,7 +19,7 @@ A synthesizable, formally verified **Dual-Core 2-Wide Superscalar Out-of-Order R
 | **Formal Proofs (SymbiYosys)** | **Unbounded ($t \to \infty$) `abc pdr` proofs** of BOTH **2-Master (`D0+D1`)** and **3-Master (`D0+D1+DMA_GETS/PUTM/RMW`)** MOESI SWMR, unique dirty owner, duplicate snoop tags & upgrade-ACK invariants + **Depth-14 `abc bmc3`** Golden Shadow Data-Value Consistency proofs (`rc=0`) |
 | **RVWMO & Multicore Fuzz** | **10 / 10** RVWMO litmus & atomic mutex tests (**0** forbidden outcomes + negative ablation proving LQ snoop-replay fixes **`219/1,000 → 0/1,000`** `CoRR` violations); **200/200** `RV32IMA` + **150/150** 1C `RV32IMAF` + **100/100** 2C `RV32IMAF` coherence fuzz programs PASS (**0** SWMR/Shadow/RVWMO errors) |
 | **Interrupts & Mixed Stress** | Real bare-metal C PLIC/CLINT ISRs with lazy FP context save (`trap.S`): warm **CLINT `MTIP` = `78` cyc**, **PLIC `MEIP` = `139` cyc**, **IPI RTT = `145` cyc**, **`< 1%`** idle `MIE=1` overhead; `S4` passes **144 simultaneous precise traps + 59 live IRQs + 768 DMA beats + 192 AMOs** under `+JITTER` (**0 errors**) |
-| **Compiled C Scaling & Ablations** | **FP SGEMM (`32×32`)**: **`3.286` chip IPC (`1.82×`)** · **Async Coherent DMA DSP (`S2`)**: **`1.06×`** faster streaming pipeline (`2,048/2,048` AXI beats, `636` dirty C2C, `8+8` PLIC ISRs) · **INT Benchmarks (`P1–P6`)**: up to **`3.021` chip IPC** & **`1.99×`** speedup · **MOESI vs. MESI**: **`−90.4%`** L2 traffic on `P3` |
+| **Compiled C Scaling & Ablations** | **FP SGEMM (`32×32`)**: **`3.286` chip IPC (`1.82×`)** · **INT Benchmarks (`P1–P6`)**: up to **`3.341` chip IPC** (`P1`), **`3.205` chip IPC** (`P2`) & **`1.99×`** speedup (`P6`) · **Async Coherent DMA DSP (`S2`)**: **`1.06×`** faster streaming pipeline (`2.306` chip IPC, `2,048/2,048` AXI beats, `636` dirty C2C) · **MOESI vs. MESI**: **`−90.4%`** L2 traffic on `P3` |
 | **Lint & Yosys Sign-Off** | **0 Verilator `-Wall` warnings**; **41 / 41** Yosys ABC unit synths + **3 / 3** full-chip flattened Tarjan **`scc -expect 0`** proofs (**0 latches, 0 comb loops**); Full 2C SoC = `1,015,040` cells (`89,805` FFs, `48 KB` SRAM; 3-master crossbar = `0.51%`, DMA = `2.19%`, APB4 fabric = `1.11%`) |
 
 ---
@@ -85,21 +85,39 @@ flowchart TB
 - **3-Master Core0+Core1+DMA MOESI Formal Proof ([`tb/formal/coh_formal_dma.sby`](tb/formal/coh_formal_dma.sby)):** `abc pdr` unbounded 3-master SWMR & Unique Dirty Owner across `{D0, D1, WBB0/1, C2C0/1, DMA_WB, DMA_RMW}` (`PASS, rc=0`) + `abc bmc3` depth-14 exact data consistency covering `DMA_GETS`, `DMA_PUTM`, and partial-byte-preserving `DMA_RMW` (`PASS, rc=0`).
 - **Standalone Stress (`tb_coh_subsystem` + `tb_dma_axi4_coh`):** `50,000` MOESI + `50,000` MESI + `5,000` Icarus dual-cache ops + `10,000` MOESI + `10,000` MESI + `2,000` Icarus concurrent 3-master AXI4 DMA ops (**0 protocol, SWMR, or Shadow errors**).
 
-### 2. Full-SoC Flagship `RV32IMAF` Benchmarks (`make test-phase-u8`, `build/bench_soc_u8.json`)
+### 2. Apples-to-Apples 1-Core vs. 2-Core IPC & Scaling (`riscv64-unknown-elf-gcc -O2`, `L1:L2:DRAM = 1:4:16`)
+Compiled bare-metal `RV32IMAF` (`make test-phase-u8`, `build/bench_soc_u8.json`) and `RV32IMA` (`make test-phase6-bench`, `build/bench_dual.json`) multi-threaded benchmarks running on `single_ooo2w_soc` (1C) vs. `dual_ooo2w_soc` (2C MOESI):
 
-| Benchmark | Measured Hardware Performance & Non-Blocking Audit | Bit-Exact / Status |
-| :--- | :--- | :---: |
-| **`S1_fp_sgemm_24x24`** | 1C: `25,769` cyc (`1.651` IPC) → 2C: `15,263` cyc (**`3.116` chip IPC**, **`1.69×`** speedup) | `0x5a5da97c` PASS |
-| **`S1_fp_sgemm_32x32`** | 1C: `55,182` cyc (`1.654` IPC) → 2C: `30,355` cyc (**`3.286` chip IPC**, **`1.82×`** speedup) | `0x0e95feb7` PASS |
-| **`S2_dma_double_buf_fp_dsp`** | CPU-Copy: `47,010` pipe cyc (`2.224` chip IPC) → **Async Coherent DMA**: **`44,164` pipe cyc (`1.06×`, `2.306` chip IPC)**, `2,048` R / `2,048` W AXI beats, `636` dirty C2C (0 flushes), `8+8` PLIC ISRs | `0x9ada2f2b` PASS |
-| **`S3_irq_latency_gpio_uart`** | `MIE=0` `1,786` cyc (`1.698` IPC) vs. `MIE=1` idle `1,803` cyc (`1.682` IPC, `+0.95%`); warm **CLINT `MTIP` = `78` cyc**, **PLIC `MEIP` = `139` cyc**, **IPI RTT = `145` cyc**, 3 GPIO + 4 Timer0 ISRs | `0x00083386` PASS |
-| **`S4_trap_stress_mixed`** | Simultaneous **144 precise traps** (`mcause=2,4,5,6,7,11`) + 16 CLINT + 16 PLIC Timer0 + 3 GPIO + 12+12 DMA IRQs + 192 `AMOADD.W` + 384/384 DMA beats + 697 C2C under `+JITTER` (`1.806` chip IPC) | `0x000840cc` PASS |
+| Benchmark | ISA | 1C Cycles | 1C IPC | 2C Cycles | 2C Chip IPC | 2C Speedup | L2 Hit % | Dirty C2C | Bit-Exact `x14` |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| `S1_fp_sgemm_24x24` (`24×24` FP32) | `RV32IMAF` | 25,769 | 1.651 | 15,263 | **3.116** | **1.69×** | 48.3% | 273 | `0x5a5da97c` |
+| `S1_fp_sgemm_32x32` (`32×32` FP32) | `RV32IMAF` | 55,182 | 1.654 | 30,355 | **3.286** | **1.82×** | 75.4% | 227 | `0x0e95feb7` |
+| `P1_parallel_matmul` (`24×24` INT) | `RV32IMA` | 49,495 | 1.720 | 26,975 | **3.341** | **1.83×** | 45.5% | 279 | `0xbc159ac5` |
+| `P2_parallel_stencil_mlp` (`16 KB`) | `RV32IMA` | 74,651 | 1.674 | 44,227 | **3.205** | **1.69×** | 88.0% | 145 | `0x5103d83c` |
+| `P3_prod_cons_ring` (`256×16 B`) | `RV32IMA` | 8,990 | 1.085 | 8,469 | 1.635 | 1.06× | 15.3% | 679 | `0x22e9e713` |
+| `P4_parallel_hist_amo` (`2,048`) | `RV32IMA` | 33,589 | 1.542 | 17,098 | **2.871** | **1.96×** | 23.9% | 173 | `0x5c11e45f` |
+| `P5_padded_counters` (`16 B`-aligned) | `RV32IMA` | 12,267 | 0.818 | 6,283 | 1.609 | **1.95×** | 32.0% | 9 | `0x5a58574a` |
+| `P5_false_shared` (same `16 B` line) | `RV32IMA` | 12,247 | 0.820 | 9,319 | 1.087 | 1.31× | 33.3% | 2,008 | `0x5a58574a` |
+| `P6_parallel_crc_fsm` (`64` pkts) | `RV32IMA` | 151,077 | 1.014 | 76,073 | 2.023 | **1.99×** | 18.8% | 23 | `0xe161b556` |
 
-### 3. Integer `RV32IMA` Scaling & Coherence Ablations (`make test-phase6-bench`)
-- **1C → 2C Parallel Scaling:** `P1_parallel_matmul` **`2.949` chip IPC (`1.86×`)**, `P2_parallel_stencil_mlp` **`3.021` chip IPC (`1.75×`)**, `P4_parallel_hist_amo` **`2.870` chip IPC (`1.96×`)**, `P5_padded_counters` **`1.95×`**, `P6_parallel_crc_fsm` **`1.99×`**.
-- **Architectural Ablations:** MOESI vs. MESI **`−90.4%`** L2 traffic on `P3`; Shared L2 **`−81.1%`** DRAM reads on `P2`; L1I Prefetcher **`−43.8%` to `−57.9%`** L1I misses; 16 B padding vs. false sharing **`1.48×` faster (`−99.6%` C2C)**.
+### 3. Full-SoC `RV32IMAF` DMA, Interrupt & Mixed-Trap Benchmarks (`make test-phase-u8`, `build/bench_soc_u8.json`)
 
-### 4. Yosys Gate-Level Synthesis & Flattened Zero-Loop Audit (`make synth-phase7`, `build/synth_audit.json`)
+| Benchmark | 2C Cycles | 2C Chip IPC | Measured SoC Non-Blocking & Hardware Metrics | Bit-Exact / Status |
+| :--- | :---: | :---: | :--- | :---: |
+| **`S2_dma_double_buf_fp_dsp`** | 89,251 (`44,164` pipe) | **2.306** | CPU-Copy: `47,010` pipe cyc (`2.224` IPC) → **Async Coherent DMA**: **`1.06×` faster streaming pipeline**, `2,048` R / `2,048` W AXI beats, `636` dirty C2C (0 flushes), `8+8` PLIC ISRs | `0x9ada2f2b` PASS |
+| **`S3_irq_latency_gpio_uart`** | 25,457 | **1.875** | `MIE=0` `1,786` cyc (`1.698` IPC) vs. `MIE=1` idle `1,803` cyc (`1.682` IPC, **`+0.95%`**); warm **CLINT `MTIP` = `78` cyc**, **PLIC `MEIP` = `139` cyc**, **IPI RTT = `145` cyc**, 3 GPIO + 4 Timer0 ISRs | `0x00083386` PASS |
+| **`S4_trap_stress_mixed`** | 35,077 | **1.806** | Simultaneous **144 precise traps** (`mcause=2,4,5,6,7,11`) + 16 CLINT + 16 PLIC Timer0 + 3 GPIO + 12+12 DMA IRQs + 192 `AMOADD.W` + 384/384 DMA beats + 697 C2C under `+JITTER` | `0x000840cc` PASS |
+
+### 4. Quantitative Architectural Ablations (`make test-phase6-bench`, `build/bench_dual.json`)
+
+| Ablation Experiment | Baseline | Upgraded | Verified Measured Impact |
+| :--- | :--- | :--- | :--- |
+| **False Sharing vs. 16 B Padding (`P5`)** | Packed same 16 B line (`9,319` cyc, `2,008` C2C) | 16 B-padded lines (`6,283` cyc, `9` C2C) | **`1.48×` speedup**, **`−99.6%` C2C ping-pongs** (`1.31× → 1.95×` vs. 1C) |
+| **MOESI (`M→O`) vs. MESI (`M→S+WB`)** | MESI (`ENABLE_MOESI_O=0`) | MOESI (`ENABLE_MOESI_O=1`) | **`−90.4%` L2 traffic on `P3`** (`749 → 72` ops, `677` WBs saved), **`−20.2%` on `P1`**, **`1,145` sharing WBs eliminated** across suite |
+| **Shared 32 KB 2-Bank L2 Cache** | 1C No-L2 (`L16` DRAM) | 1C+L2 / 2C+L2 | **`−81.1%` DRAM reads on `P2`** (`5,678 → 1,072`), **`1.44×`** 1C L2 gain (`1.166 → 1.674` IPC), **`2.42×`** (`P2`) & **`2.39×`** (`P4`) combined 2C+L2 gain |
+| **L1I Next-Line Prefetcher (2C)** | Prefetcher OFF (`ENABLE_PREFETCH=0`) | Prefetcher ON (`ENABLE_PREFETCH=1`) | **`−43.8%` to `−56.2%` L1I misses** across all 7 variants (`P6`: `155 → 73`, **−52.9%**; `P2`: `128 → 56`, **−56.2%**) |
+
+### 5. Yosys Gate-Level Synthesis & Flattened Zero-Loop Audit (`make synth-phase7`, `build/synth_audit.json`)
 
 | Subsystem / Module | ABC Std Cells | Comb Gates | Flip-Flops | Latches | Comb Loops |
 | :--- | :---: | :---: | :---: | :---: | :---: |
