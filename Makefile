@@ -45,13 +45,13 @@ CFLAGS_BASE := -march=rv32ima -mabi=ilp32 -O2 -ffreestanding -nostdlib -nostartf
         synth-phase0 synth-phase1 synth-phase2 synth-phase3 synth-phase4 synth-phase-u2 synth-phase-u3 synth-phase-u4 synth-phase-u5 synth-phase-u6 synth-phase-u7 synth-phase7 \
         test-phase0-unit test-phase1-unit test-phase2-unit test-phase3-unit formal-phase3 formal-phase-u7 \
         test-phase0-asm test-phase0-c-build test-phase0-baseline test-phase1-v2 test-phase2-l2 \
-        test-phase4-litmus test-phase5-fuzz test-phase6-bench test-phase-u1 test-phase-u2 test-phase-u3 test-phase-u4 test-phase-u5 test-phase-u6 test-phase-u7 clean
+        test-phase4-litmus test-phase5-fuzz test-phase6-bench test-phase-u1 test-phase-u2 test-phase-u3 test-phase-u4 test-phase-u5 test-phase-u6 test-phase-u7 test-phase-u8 clean
 
 all: lint-phase0 lint-phase1 lint-phase2 lint-phase3 lint-phase4 lint-phase-u2 lint-phase-u3 lint-phase-u4 lint-phase-u5 lint-phase-u6 lint-phase-u7 \
      synth-phase0 synth-phase1 synth-phase2 synth-phase3 synth-phase4 synth-phase-u2 synth-phase-u3 synth-phase-u4 synth-phase-u5 synth-phase-u6 synth-phase-u7 synth-phase7 \
      test-phase0-unit test-phase1-unit test-phase2-unit test-phase3-unit formal-phase3 formal-phase-u7 \
      test-phase0-asm test-phase0-c-build test-phase0-baseline test-phase1-v2 test-phase2-l2 \
-     test-phase4-litmus test-phase5-fuzz test-phase6-bench test-phase-u1 test-phase-u2 test-phase-u3 test-phase-u4 test-phase-u5 test-phase-u6 test-phase-u7
+     test-phase4-litmus test-phase5-fuzz test-phase6-bench test-phase-u1 test-phase-u2 test-phase-u3 test-phase-u4 test-phase-u5 test-phase-u6 test-phase-u7 test-phase-u8
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -357,6 +357,13 @@ test-phase-u7: $(BUILD_DIR)
 	# 2. Live Dual-Core RV32IMAF C Coherent DMA + PLIC IRQ + Hardware Snoop-Replay Proof
 	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_BUILD) -GDRAM_LATENCY=16 -GL2_HIT_LAT=3 -GENABLE_PREFETCH=1 -GENABLE_MOESI_O=1 -GENABLE_SNOOP_REPLAY=1 --Mdir $(BUILD_DIR)/v_dual_soc -o Vdual_soc --top-module tb_dual_ooo2w_soc $(RTL_COMMON) $(RTL_MEM) $(RTL_COH) $(RTL_CORE) $(RTL_P4_SOC) tb/unit/coh_checker.sv tb/soc/tb_dual_ooo2w_soc.sv
 	$(PYTHON) scripts/test_phase_u7_dma.py
+
+test-phase-u8: $(BUILD_DIR)
+	@test -x $(BUILD_DIR)/v_p2_c0/Vp2_c0 || \
+	  PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_BUILD) -GCORE_ID=0 -GDRAM_LATENCY=16 -GL2_HIT_LAT=3 -GENABLE_PREFETCH=1 --Mdir $(BUILD_DIR)/v_p2_c0 -o Vp2_c0 --top-module tb_single_ooo2w_soc $(RTL_COMMON) $(RTL_MEM) $(RTL_CORE) $(RTL_P2_SOC) tb/common/ooo_trace_mon2w.sv tb/soc/tb_single_ooo2w_soc.sv
+	@test -x $(BUILD_DIR)/v_dual_soc/Vdual_soc || \
+	  PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_BUILD) -GDRAM_LATENCY=16 -GL2_HIT_LAT=3 -GENABLE_PREFETCH=1 -GENABLE_MOESI_O=1 -GENABLE_SNOOP_REPLAY=1 --Mdir $(BUILD_DIR)/v_dual_soc -o Vdual_soc --top-module tb_dual_ooo2w_soc $(RTL_COMMON) $(RTL_MEM) $(RTL_COH) $(RTL_CORE) $(RTL_P4_SOC) tb/unit/coh_checker.sv tb/soc/tb_dual_ooo2w_soc.sv
+	$(PYTHON) scripts/run_soc_benchmarks.py
 
 clean:
 	rm -rf $(BUILD_DIR)
