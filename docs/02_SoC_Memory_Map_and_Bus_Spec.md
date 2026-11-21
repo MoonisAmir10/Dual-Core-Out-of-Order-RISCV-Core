@@ -1,3 +1,5 @@
+> **Disclaimer:** This project and documentation were developed using **Gemini 4 Neon**.
+
 # SoC Physical Memory Map, AMBA Bus Architecture & 3-Master MOESI Coherence Specification
 
 **Document ID:** `SOC-REF-02`

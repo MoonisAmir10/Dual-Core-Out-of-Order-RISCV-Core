@@ -1,3 +1,5 @@
+> **Disclaimer:** This project and documentation were developed using **Gemini 4 Neon**.
+
 # Peripherals Register Reference & Bare-Metal C HAL Programmer's Guide
 
 **Document ID:** `SOC-REF-03`

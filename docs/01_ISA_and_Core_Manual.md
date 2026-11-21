@@ -1,3 +1,5 @@
+> **Disclaimer:** This project and documentation were developed using **Gemini 4 Neon**.
+
 # ISA, Privilege Architecture & 2-Wide Out-of-Order Core Reference Manual
 
 **Document ID:** `SOC-REF-01`
