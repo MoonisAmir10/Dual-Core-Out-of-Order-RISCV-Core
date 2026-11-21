@@ -210,6 +210,8 @@ initial begin
 
     for (li = 0; li < 4096; li = li + 1)
         u_dut.u_dram.mem[li] = {hex_words[li*4+3], hex_words[li*4+2], hex_words[li*4+1], hex_words[li*4+0]};
+    for (li = 4096; li < 16384; li = li + 1)
+        u_dut.u_dram.mem[li] = 128'd0;
 
     if ($value$plusargs("TRACE=%s", trace_file)) begin
         trace_fd = $fopen(trace_file, "r");

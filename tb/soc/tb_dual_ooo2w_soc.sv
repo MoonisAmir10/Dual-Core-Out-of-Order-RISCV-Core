@@ -349,10 +349,11 @@ initial begin
         $fatal(1);
     end
 
-    $display("PASS [dual_ooo2w_soc]: file=%0s cycles=%0d c0_ret=%0d c1_ret=%0d chip_IPC=%0.3f c0_x14=0x%08x c1_x14=0x%08x replay=%0d/%0d amo=%0d/%0d coh_gets=%0d coh_getm=%0d coh_upg=%0d c2c=%0d e2m=%0d mesi_wb=%0d l2_h=%0d l2_m=%0d l2_wb=%0d l2_bc=%0d dram_r=%0d dram_w=%0d",
+    $display("PASS [dual_ooo2w_soc]: file=%0s cycles=%0d c0_ret=%0d c1_ret=%0d chip_IPC=%0.3f c0_x14=0x%08x c1_x14=0x%08x replay=%0d/%0d amo=%0d/%0d ic_m=%0d/%0d dc_m=%0d/%0d coh_gets=%0d coh_getm=%0d coh_upg=%0d c2c=%0d e2m=%0d mesi_wb=%0d l2_h=%0d l2_m=%0d l2_wb=%0d l2_bc=%0d dram_r=%0d dram_w=%0d",
              hex_file, pmu_cycles, pmu_c0_instret, pmu_c1_instret,
              (pmu_cycles > 0) ? (1.0 * (pmu_c0_instret + pmu_c1_instret) / pmu_cycles) : 0.0,
              c0_x14, c1_x14, pmu_c0_replay, pmu_c1_replay, pmu_c0_amo, pmu_c1_amo,
+             pmu_c0_ic_m, pmu_c1_ic_m, pmu_c0_dc_m, pmu_c1_dc_m,
              pmu_gets, pmu_getm, pmu_upg, pmu_c2c, pmu_e2m, pmu_mesi_wb,
              pmu_l2_h, pmu_l2_m, pmu_l2_wb, pmu_l2_bc, pmu_dram_r, pmu_dram_w);
     $finish;
