@@ -55,6 +55,11 @@ wire [127:0] d0_wr_dat, d1_wr_dat;
 
 wire        c0_halted, c1_halted, all_halted, clint_msip0, clint_msip1;
 wire [31:0] c0_x14, c1_x14;
+reg  [31:0] gpio_in;
+wire [31:0] gpio_out, gpio_oe;
+wire        uart_tx, uart_tx_ch_v;
+wire [7:0]  uart_tx_ch_d;
+wire [1:0]  pwm_out;
 wire [31:0] pmu_cycles, pmu_c0_cycles, pmu_c1_cycles, pmu_c0_instret, pmu_c1_instret;
 wire [31:0] pmu_c0_ic_h, pmu_c0_ic_m, pmu_c1_ic_h, pmu_c1_ic_m;
 wire [31:0] pmu_c0_dc_h, pmu_c0_dc_m, pmu_c1_dc_h, pmu_c1_dc_m;
@@ -97,6 +102,10 @@ dual_ooo2w_soc #(
     .c0_halted(c0_halted), .c1_halted(c1_halted), .all_halted(all_halted),
     .c0_x14(c0_x14), .c1_x14(c1_x14),
     .clint_msip0(clint_msip0), .clint_msip1(clint_msip1),
+    .gpio_in(gpio_in), .gpio_out(gpio_out), .gpio_oe(gpio_oe),
+    .uart_rx(1'b1), .uart_tx(uart_tx),
+    .uart_tx_char_valid(uart_tx_ch_v), .uart_tx_char_data(uart_tx_ch_d),
+    .pwm_out(pwm_out),
     .pmu_cycles(pmu_cycles), .pmu_c0_cycles(pmu_c0_cycles), .pmu_c1_cycles(pmu_c1_cycles),
     .pmu_c0_instret(pmu_c0_instret), .pmu_c1_instret(pmu_c1_instret),
     .pmu_c0_ic_hits(pmu_c0_ic_h), .pmu_c0_ic_misses(pmu_c0_ic_m),
@@ -134,13 +143,14 @@ always #5 clk = ~clk;
 
 reg [31:0] hex_words [0:16383];
 
-integer max_cycles, sim_cyc, swmr_errs, log_fd;
+integer max_cycles, sim_cyc, swmr_errs, log_fd, uart_fd;
 integer c0_hang_wd, c1_hang_wd;
-reg     has_log, exp_c0_en, exp_c1_en;
+integer stim_cnt, pwm0_hi, pwm0_edges, pwm1_hi, pwm1_edges, uart_bytes;
+reg     has_log, has_uart, gpio_stim_en, exp_c0_en, exp_c1_en, prev_pwm0, prev_pwm1;
 reg [31:0] exp_c0_x14, exp_c1_x14;
 reg [31:0] dump_base;
 integer    dump_words;
-reg [8*256-1:0] hex_file, log_file;
+reg [8*256-1:0] hex_file, log_file, uart_file;
 
 // Fast SWMR + Golden Shadow Data-Value Check on Every Coherence Bus Event & Every 64 Cycles!
 task check_swmr_line(input [15:0] la);
@@ -221,6 +231,25 @@ always @(posedge clk) begin
             swmr_errs = swmr_errs + 1;
         end
 
+        // Peripheral harness: UART console capture, PWM monitor & GPIO pin stimulus
+        if (uart_tx_ch_v) begin
+            uart_bytes = uart_bytes + 1;
+            if (has_uart) $fwrite(uart_fd, "%c", uart_tx_ch_d);
+        end
+        if (pwm_out[0]) pwm0_hi = pwm0_hi + 1;
+        if (pwm_out[0] && !prev_pwm0) pwm0_edges = pwm0_edges + 1;
+        if (pwm_out[1]) pwm1_hi = pwm1_hi + 1;
+        if (pwm_out[1] && !prev_pwm1) pwm1_edges = pwm1_edges + 1;
+        prev_pwm0 = pwm_out[0];
+        prev_pwm1 = pwm_out[1];
+
+        if (gpio_stim_en && gpio_out[15]) begin
+            stim_cnt = stim_cnt + 1;
+            if (stim_cnt == 64)        gpio_in = 32'h0000_0001; // Rising edge pin 0
+            else if (stim_cnt == 1800) gpio_in = 32'h0000_0003; // Rising edge pin 1
+            else if (stim_cnt == 3200) gpio_in = 32'h0000_0006; // Rising edge pin 2 (pin 0 low)
+        end
+
         // Optional 4-Wide RVFI + Channel A Global Trace Log (for Phase 5 Linearizability Checker)
         if (has_log) begin
             if (bus_evt_v)
@@ -260,12 +289,23 @@ reg [1:0]  dwo;
 initial begin
     reset_n        = 1'b0;
     dram_jitter_en = 1'b0;
+    gpio_in        = 32'd0;
     max_cycles     = 400000;
     sim_cyc        = 0;
     swmr_errs      = 0;
     c0_hang_wd     = 0;
     c1_hang_wd     = 0;
+    stim_cnt       = 0;
+    pwm0_hi        = 0;
+    pwm0_edges     = 0;
+    pwm1_hi        = 0;
+    pwm1_edges     = 0;
+    uart_bytes     = 0;
+    prev_pwm0      = 1'b0;
+    prev_pwm1      = 1'b0;
     has_log        = 1'b0;
+    has_uart       = 1'b0;
+    gpio_stim_en   = 1'b0;
     exp_c0_en      = 1'b0;
     exp_c1_en      = 1'b0;
     exp_c0_x14     = 32'd0;
@@ -299,6 +339,15 @@ initial begin
         end
         has_log = 1'b1;
     end
+    if ($value$plusargs("UART_OUT=%s", uart_file)) begin
+        uart_fd = $fopen(uart_file, "w");
+        if (uart_fd == 0) begin
+            $display("FAIL [tb_dual_ooo2w_soc]: Cannot open UART_OUT %0s", uart_file);
+            $fatal(1);
+        end
+        has_uart = 1'b1;
+    end
+    if ($test$plusargs("GPIO_STIM")) gpio_stim_en = 1'b1;
     if ($value$plusargs("MAX_CYCLES=%d", max_cycles)) begin end
     if ($value$plusargs("EXPECT_C0_X14=%h", exp_c0_x14)) exp_c0_en = 1'b1;
     if ($value$plusargs("EXPECT_C1_X14=%h", exp_c1_x14)) exp_c1_en = 1'b1;
@@ -315,7 +364,12 @@ initial begin
         sim_cyc = sim_cyc + 1;
     end
 
-    if (has_log) $fclose(log_fd);
+    if (has_log)  $fclose(log_fd);
+    if (has_uart) $fclose(uart_fd);
+
+    if (has_uart || gpio_stim_en)
+        $display("PERIPH_STATS: gpio_out=0x%08x gpio_oe=0x%08x pwm0_hi=%0d pwm0_edges=%0d pwm1_hi=%0d pwm1_edges=%0d uart_bytes=%0d",
+                 gpio_out, gpio_oe, pwm0_hi, pwm0_edges, pwm1_hi, pwm1_edges, uart_bytes);
 
     // Optional architectural memory dump (from Golden Shadow Memory, which reflects exact coherent state!)
     for (di = 0; di < dump_words; di = di + 1) begin

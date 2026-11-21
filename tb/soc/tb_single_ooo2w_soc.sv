@@ -42,6 +42,11 @@ wire [31:0] trace_flush_after_seq;
 
 wire        dut_halted, clint_msip0, clint_msip1;
 wire [31:0] dut_x14;
+reg  [31:0] gpio_in;
+wire [31:0] gpio_out, gpio_oe;
+wire        uart_tx, uart_tx_ch_v;
+wire [7:0]  uart_tx_ch_d;
+wire [1:0]  pwm_out;
 wire [31:0] pmu_cycles, pmu_instret;
 wire [31:0] pmu_ic_hits, pmu_ic_misses, pmu_ic_pf_hits;
 wire [31:0] pmu_dcache_hits, pmu_dcache_misses, pmu_dcache_wbs, pmu_dcache_hum, pmu_dcache_mum_cyc;
@@ -80,6 +85,10 @@ single_ooo2w_soc #(
     .trace_flush_valid(trace_flush_valid), .trace_flush_after_seq(trace_flush_after_seq),
     .halted(dut_halted), .x14(dut_x14),
     .clint_msip0(clint_msip0), .clint_msip1(clint_msip1),
+    .gpio_in(gpio_in), .gpio_out(gpio_out), .gpio_oe(gpio_oe),
+    .uart_rx(1'b1), .uart_tx(uart_tx),
+    .uart_tx_char_valid(uart_tx_ch_v), .uart_tx_char_data(uart_tx_ch_d),
+    .pwm_out(pwm_out),
     .pmu_cycles(pmu_cycles), .pmu_instret(pmu_instret),
     .pmu_ic_hits(pmu_ic_hits), .pmu_ic_misses(pmu_ic_misses), .pmu_ic_pf_hits(pmu_ic_pf_hits),
     .pmu_dcache_hits(pmu_dcache_hits), .pmu_dcache_misses(pmu_dcache_misses),
@@ -117,10 +126,11 @@ always #5 clk = ~clk;
 
 reg [31:0] hex_words [0:16383];
 
-integer trace_fd, commit_idx, cmp_errors, max_cycles, sim_cyc;
-reg     has_trace, expect_x14_en;
+integer trace_fd, uart_fd, commit_idx, cmp_errors, max_cycles, sim_cyc;
+integer stim_cnt, pwm0_hi, pwm0_edges, pwm1_hi, pwm1_edges, uart_bytes;
+reg     has_trace, has_uart, gpio_stim_en, expect_x14_en, prev_pwm0, prev_pwm1;
 reg [31:0] expect_x14;
-reg [8*256-1:0] hex_file, trace_file;
+reg [8*256-1:0] hex_file, trace_file, uart_file;
 
 task check_commit_lane(
     input integer lane,
@@ -182,6 +192,25 @@ always @(posedge clk) begin
         if (commit1_valid)
             check_commit_lane(1, commit1_pc, commit1_instr, commit1_rd_we, commit1_rd_addr, commit1_rd_wdata,
                               commit1_mem_valid, commit1_mem_we, commit1_mem_addr, commit1_mem_wstrb, commit1_mem_wdata);
+
+        // Peripheral harness: UART console capture, PWM waveform monitor & GPIO stimulus
+        if (uart_tx_ch_v) begin
+            uart_bytes = uart_bytes + 1;
+            if (has_uart) $fwrite(uart_fd, "%c", uart_tx_ch_d);
+        end
+        if (pwm_out[0]) pwm0_hi = pwm0_hi + 1;
+        if (pwm_out[0] && !prev_pwm0) pwm0_edges = pwm0_edges + 1;
+        if (pwm_out[1]) pwm1_hi = pwm1_hi + 1;
+        if (pwm_out[1] && !prev_pwm1) pwm1_edges = pwm1_edges + 1;
+        prev_pwm0 = pwm_out[0];
+        prev_pwm1 = pwm_out[1];
+
+        if (gpio_stim_en && gpio_out[15]) begin
+            stim_cnt = stim_cnt + 1;
+            if (stim_cnt == 64)        gpio_in = 32'h0000_0001; // Rising edge pin 0
+            else if (stim_cnt == 1800) gpio_in = 32'h0000_0003; // Rising edge pin 1
+            else if (stim_cnt == 3200) gpio_in = 32'h0000_0006; // Rising edge pin 2 (pin 0 low)
+        end
     end
 end
 /* verilator lint_on SYNCASYNCNET */
@@ -192,9 +221,20 @@ integer wi, li;
 initial begin
     reset_n        = 1'b0;
     dram_jitter_en = 1'b0;
+    gpio_in        = 32'd0;
     commit_idx     = 0;
     cmp_errors     = 0;
+    stim_cnt       = 0;
+    pwm0_hi        = 0;
+    pwm0_edges     = 0;
+    pwm1_hi        = 0;
+    pwm1_edges     = 0;
+    uart_bytes     = 0;
+    prev_pwm0      = 1'b0;
+    prev_pwm1      = 1'b0;
     has_trace      = 1'b0;
+    has_uart       = 1'b0;
+    gpio_stim_en   = 1'b0;
     expect_x14_en  = 1'b0;
     expect_x14     = 32'd0;
     max_cycles     = 200000;
@@ -221,6 +261,15 @@ initial begin
         end
         has_trace = 1'b1;
     end
+    if ($value$plusargs("UART_OUT=%s", uart_file)) begin
+        uart_fd = $fopen(uart_file, "w");
+        if (uart_fd == 0) begin
+            $display("FAIL [tb_single_ooo2w_soc]: Cannot open UART_OUT %0s", uart_file);
+            $fatal(1);
+        end
+        has_uart = 1'b1;
+    end
+    if ($test$plusargs("GPIO_STIM")) gpio_stim_en = 1'b1;
     if ($value$plusargs("MAX_CYCLES=%d", max_cycles)) begin end
     if ($value$plusargs("EXPECT_X14=%h", expect_x14)) expect_x14_en = 1'b1;
     if ($test$plusargs("JITTER")) dram_jitter_en = 1'b1;
@@ -240,6 +289,11 @@ initial begin
     end
 
     if (has_trace) $fclose(trace_fd);
+    if (has_uart)  $fclose(uart_fd);
+
+    if (has_uart || gpio_stim_en)
+        $display("PERIPH_STATS: gpio_out=0x%08x gpio_oe=0x%08x pwm0_hi=%0d pwm0_edges=%0d pwm1_hi=%0d pwm1_edges=%0d uart_bytes=%0d",
+                 gpio_out, gpio_oe, pwm0_hi, pwm0_edges, pwm1_hi, pwm1_edges, uart_bytes);
 
     if (!dut_halted) begin
         $display("FAIL [tb_single_ooo2w_soc]: Timeout after %0d cycles (commits=%0d)", max_cycles, commit_idx);

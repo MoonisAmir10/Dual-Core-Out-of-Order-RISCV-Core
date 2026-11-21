@@ -114,6 +114,16 @@ module dual_ooo2w_soc #(
     output wire         clint_msip0,
     output wire         clint_msip1,
 
+    // -------------------- External AMBA APB4 Peripheral Pins --------------------
+    input  wire [31:0]  gpio_in,
+    output wire [31:0]  gpio_out,
+    output wire [31:0]  gpio_oe,
+    input  wire         uart_rx,
+    output wire         uart_tx,
+    output wire         uart_tx_char_valid,
+    output wire [7:0]   uart_tx_char_data,
+    output wire [1:0]   pwm_out,
+
     // -------------------- Chip, Core, Coherence, L2 & DRAM PMU Counters --------------------
     output reg  [31:0]  pmu_cycles,
     output reg  [31:0]  pmu_c0_cycles,
@@ -154,7 +164,7 @@ localparam integer LINE_BITS = DRAM_LINE_BITS;
 
 `include "soc_addr_map.vh"
 localparam integer APB_NUM_SLAVES = 7;
-localparam [15:0]  APB_SLV_MASK   = 16'b0000_0000_0100_0011; // S0=CLINT, S1=PLIC, S6=SOC_CTRL
+localparam [15:0]  APB_SLV_MASK   = 16'b0000_0000_0110_1111; // S0=CLINT, S1=PLIC, S2=GPIO, S3=UART, S5=TIMER, S6=SOC_CTRL
 
 wire        soc_sys_halt;
 wire [31:0] soc_tohost_u;
@@ -245,7 +255,9 @@ wire [3:0]  apb_s_pstrb;
 
 wire        clint_mtip0, clint_mtip1;
 wire [1:0]  plic_meip;
+wire        gpio_irq, uart_rx_irq, uart_tx_irq, timer_irq0, timer_irq1;
 wire [15:1] soc_irq_inject;
+wire [15:1] plic_irq_src = {8'd0, timer_irq1, timer_irq0, 2'b00, uart_tx_irq, uart_rx_irq, gpio_irq} | soc_irq_inject;
 wire [63:0] clint_mtime_u;
 
 assign c0_dc_rdy = c0_dc_is_mmio ? c0_mmio_rdy : d0_req_rdy;
@@ -528,18 +540,9 @@ mmio_to_apb4_bridge #(.ID_W(ID_W)) u_apb_bridge (
     .m_pready(apb_m_pready), .m_prdata(apb_m_prdata), .m_pslverr(apb_m_pslverr)
 );
 
-assign apb_s_pready[APB_SLV_GPIO]       = 1'b1;
-assign apb_s_pslverr[APB_SLV_GPIO]      = 1'b1;
-assign apb_s_prdata[APB_SLV_GPIO*32  +: 32] = 32'd0;
-assign apb_s_pready[APB_SLV_UART]       = 1'b1;
-assign apb_s_pslverr[APB_SLV_UART]      = 1'b1;
-assign apb_s_prdata[APB_SLV_UART*32  +: 32] = 32'd0;
 assign apb_s_pready[APB_SLV_DMA]        = 1'b1;
 assign apb_s_pslverr[APB_SLV_DMA]       = 1'b1;
 assign apb_s_prdata[APB_SLV_DMA*32   +: 32] = 32'd0;
-assign apb_s_pready[APB_SLV_TIMER]      = 1'b1;
-assign apb_s_pslverr[APB_SLV_TIMER]     = 1'b1;
-assign apb_s_prdata[APB_SLV_TIMER*32 +: 32] = 32'd0;
 
 apb4_interconnect #(
     .NUM_SLAVES(APB_NUM_SLAVES),
@@ -575,14 +578,46 @@ apb4_plic #(
     .pready(apb_s_pready[APB_SLV_PLIC]),
     .prdata(apb_s_prdata[APB_SLV_PLIC*32 +: 32]),
     .pslverr(apb_s_pslverr[APB_SLV_PLIC]),
-    .irq_src_in(soc_irq_inject),
+    .irq_src_in(plic_irq_src),
     .meip_out(plic_meip)
+);
+
+apb4_gpio u_gpio (
+    .pclk(clk), .preset_n(reset_n),
+    .psel(apb_s_psel[APB_SLV_GPIO]), .penable(apb_s_penable), .pwrite(apb_s_pwrite),
+    .paddr(apb_s_paddr), .pwdata(apb_s_pwdata), .pstrb(apb_s_pstrb),
+    .pready(apb_s_pready[APB_SLV_GPIO]),
+    .prdata(apb_s_prdata[APB_SLV_GPIO*32 +: 32]),
+    .pslverr(apb_s_pslverr[APB_SLV_GPIO]),
+    .gpio_in(gpio_in), .gpio_out(gpio_out), .gpio_oe(gpio_oe), .irq_out(gpio_irq)
+);
+
+apb4_uart u_uart (
+    .pclk(clk), .preset_n(reset_n),
+    .psel(apb_s_psel[APB_SLV_UART]), .penable(apb_s_penable), .pwrite(apb_s_pwrite),
+    .paddr(apb_s_paddr), .pwdata(apb_s_pwdata), .pstrb(apb_s_pstrb),
+    .pready(apb_s_pready[APB_SLV_UART]),
+    .prdata(apb_s_prdata[APB_SLV_UART*32 +: 32]),
+    .pslverr(apb_s_pslverr[APB_SLV_UART]),
+    .uart_rx(uart_rx), .uart_tx(uart_tx),
+    .tx_char_valid(uart_tx_char_valid), .tx_char_data(uart_tx_char_data),
+    .rx_irq_out(uart_rx_irq), .tx_irq_out(uart_tx_irq)
+);
+
+apb4_timer_pwm u_timer (
+    .pclk(clk), .preset_n(reset_n),
+    .psel(apb_s_psel[APB_SLV_TIMER]), .penable(apb_s_penable), .pwrite(apb_s_pwrite),
+    .paddr(apb_s_paddr), .pwdata(apb_s_pwdata), .pstrb(apb_s_pstrb),
+    .pready(apb_s_pready[APB_SLV_TIMER]),
+    .prdata(apb_s_prdata[APB_SLV_TIMER*32 +: 32]),
+    .pslverr(apb_s_pslverr[APB_SLV_TIMER]),
+    .pwm_out(pwm_out), .irq_ch0_out(timer_irq0), .irq_ch1_out(timer_irq1)
 );
 
 apb4_soc_ctrl #(
     .SOC_ID(32'h2002_0002),
     .NUM_CORES(32'd2),
-    .FEATURE_MASK(32'h0000_0007)
+    .FEATURE_MASK(32'h0000_000F)
 ) u_soc_ctrl (
     .pclk(clk), .preset_n(reset_n),
     .psel(apb_s_psel[APB_SLV_SOC_CTRL]), .penable(apb_s_penable), .pwrite(apb_s_pwrite),

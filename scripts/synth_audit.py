@@ -37,7 +37,8 @@ INC = f"-I{ROOT / 'rtl' / 'common'} -I{ROOT / 'rtl' / 'coherence'} -I{ROOT / 'rt
 
 RTL_APB = [
     "rtl/bus/mmio_to_apb4_bridge.sv", "rtl/bus/apb4_interconnect.sv",
-    "rtl/periph/apb4_clint.sv", "rtl/periph/apb4_plic.sv", "rtl/periph/apb4_soc_ctrl.sv",
+    "rtl/periph/apb4_clint.sv", "rtl/periph/apb4_plic.sv", "rtl/periph/apb4_gpio.sv",
+    "rtl/periph/apb4_uart.sv", "rtl/periph/apb4_timer_pwm.sv", "rtl/periph/apb4_soc_ctrl.sv",
 ]
 
 RTL_COMMON = [
@@ -92,6 +93,9 @@ SYNTH_UNITS: List[Tuple[str, str, List[str], str, int, int, str, str]] = [
     ("apb4_xbar",        "apb4_interconnect",   ["rtl/bus/apb4_interconnect.sv"],   "", 1, 1, "uncore", "Expandable AMBA APB4 Decoder/Mux (NUM_SLAVES=7)"),
     ("apb4_clint",       "apb4_clint",          ["rtl/periph/apb4_clint.sv"],       "", 1, 1, "uncore", "AMBA APB4 CLINT (mtime, mtimecmp0/1, msip0/1)"),
     ("apb4_plic",        "apb4_plic",           ["rtl/periph/apb4_plic.sv"],        "", 1, 1, "uncore", "AMBA APB4 RISC-V PLIC (16 src, 2 harts, atomic claim)"),
+    ("apb4_gpio",        "apb4_gpio",           ["rtl/periph/apb4_gpio.sv"],        "", 1, 1, "uncore", "AMBA APB4 32-Pin GPIO (atomic SET/CLR/TGL + Edge/Lvl IRQ)"),
+    ("apb4_uart",        "apb4_uart",           ["rtl/periph/apb4_uart.sv"],        "", 1, 1, "uncore", "AMBA APB4 16-FIFO 8N1 Full-Duplex UART + Loopback/Tap"),
+    ("apb4_timer_pwm",   "apb4_timer_pwm",      ["rtl/periph/apb4_timer_pwm.sv"],   "", 1, 1, "uncore", "AMBA APB4 2-Channel 32-Bit Timer & PWM Generator"),
     ("apb4_soc_ctrl",    "apb4_soc_ctrl",       ["rtl/periph/apb4_soc_ctrl.sv"],    "", 1, 1, "uncore", "AMBA APB4 SoC Ctrl, TOHOST/HALT & Live PMU"),
 ]
 
@@ -283,7 +287,7 @@ def main() -> int:
     print(f"  1-Core SoC (1C + L1 + L2)     : {c1_tot_cells:7,d} cells, {c1_tot_ff:6,d} FFs, 40 KB on-chip SRAM")
     print(f"  2-Core SoC (2C + MOESI + L2)  : {c2_tot_cells:7,d} cells, {c2_tot_ff:6,d} FFs, 48 KB on-chip SRAM")
     print(f"  2C / 1C Scaling Ratio         : {cell_ratio:.2f}x cells, {ff_ratio:.2f}x FFs (MOESI crossbar = only {coh_xbar_pct:.2f}% of chip!)")
-    print(f"\nPASS [synth-phase7]: {len(units)}/24 ABC unit synths + 3/3 flattened SoC loop proofs PASSED in {summary['total_wall_sec']}s! Exported {out_p}")
+    print(f"\nPASS [synth-phase7]: {len(units)}/{len(SYNTH_UNITS)} ABC unit synths + {len(full_audits)}/{len(FULL_SOC_LOOP_AUDITS)} flattened SoC loop proofs PASSED in {summary['total_wall_sec']}s! Exported {out_p}")
     return 0
 
 
