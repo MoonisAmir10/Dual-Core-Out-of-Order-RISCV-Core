@@ -84,7 +84,7 @@ uint32_t main(uint32_t hartid) {
     if (SOC_ID_REG != 0x20020002u)   return 0xBAD20001u;
     uint32_t ncores = SOC_CORE_CNT;
     if (ncores != 1u && ncores != 2u) return 0xBAD20002u;
-    if (SOC_FEAT_MASK != 0x00000003u) return 0xBAD20003u;
+    if ((SOC_FEAT_MASK & 0x00000003u) != 0x00000003u) return 0xBAD20003u;
 
     uint32_t cyc0 = SOC_PMU_CYCLES;
     if (cyc0 == 0u)                  return 0xBAD20004u;
@@ -117,13 +117,13 @@ uint32_t main(uint32_t hartid) {
     uint32_t canary = 0x55AA7788u;
     /* 4 Load Access Faults (mcause = 5) */
     probe_load_fault(0x00040000u, &canary); /* unmapped RAM hole */
-    probe_load_fault(0x0C000000u, &canary); /* unpopulated PLIC slot */
+    probe_load_fault(0x10080000u, &canary); /* unpopulated expansion slot S10 */
     probe_load_fault(0x10050000u, &canary); /* unpopulated expansion slot S7 */
     probe_load_fault(0xDEAD0000u, &canary); /* unmapped 32-bit space */
 
     /* 6 Store/AMO Access Faults (mcause = 7) */
     probe_store_fault(0x00040000u, 0x11111111u);
-    probe_store_fault(0x0C000000u, 0x22222222u);
+    probe_store_fault(0x10080000u, 0x22222222u);
     probe_store_fault(0x10050000u, 0x33333333u);
     probe_store_fault(0xDEAD0000u, 0x44444444u);
     probe_store_fault(0x10040000u, 0xBAD0BAD0u); /* RO SOC_ID write -> PSLVERR! */

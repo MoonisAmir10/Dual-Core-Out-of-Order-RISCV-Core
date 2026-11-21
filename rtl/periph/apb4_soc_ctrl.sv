@@ -11,6 +11,7 @@
 //   0x00C : SYS_HALT      (RW) - Writing bit[0]=1 asserts sys_halt_out cleanly!
 //   0x010 : TOHOST        (RW) - 32-bit software exit code / status mailbox
 //   0x014 : SCRATCH       (RW) - 32-bit general SoC scratch register
+//   0x018 : IRQ_INJECT    (RW) - Bits [15:1] software-driven PLIC test IRQs (bit0=0)
 //   0x020 : PMU_CYCLES    (RO) - Live chip cycles
 //   0x024 : PMU_C0_RET    (RO) - Core 0 retired instructions
 //   0x028 : PMU_C1_RET    (RO) - Core 1 retired instructions
@@ -55,16 +56,19 @@ module apb4_soc_ctrl #(
 
     // SoC Control Outputs
     output wire        sys_halt_out,
-    output wire [31:0] tohost_out
+    output wire [31:0] tohost_out,
+    output wire [15:1] irq_inject_out
 );
 
 reg        sys_halt_r;
 reg [31:0] tohost_r;
 reg [31:0] scratch_r;
+reg [15:1] irq_inject_r;
 
-assign pready       = 1'b1;
-assign sys_halt_out = sys_halt_r;
-assign tohost_out   = tohost_r;
+assign pready         = 1'b1;
+assign sys_halt_out   = sys_halt_r;
+assign tohost_out     = tohost_r;
+assign irq_inject_out = irq_inject_r;
 
 function automatic [31:0] mask_merge(
     input [31:0] old_v,
@@ -82,7 +86,8 @@ function automatic [31:0] mask_merge(
 endfunction
 
 wire [11:0] reg_off   = {paddr[11:2], 2'b00};
-wire        is_wr_reg = (reg_off == 12'h00C) || (reg_off == 12'h010) || (reg_off == 12'h014);
+wire        is_wr_reg = (reg_off == 12'h00C) || (reg_off == 12'h010) ||
+                        (reg_off == 12'h014) || (reg_off == 12'h018);
 
 // Writing to any read-only or unimplemented register asserts PSLVERR!
 assign pslverr = psel && pwrite && !is_wr_reg;
@@ -95,6 +100,7 @@ always @(*) begin
         12'h00C: prdata = {31'd0, sys_halt_r};
         12'h010: prdata = tohost_r;
         12'h014: prdata = scratch_r;
+        12'h018: prdata = {16'd0, irq_inject_r, 1'b0};
         12'h020: prdata = pmu_cycles_in;
         12'h024: prdata = pmu_c0_instret_in;
         12'h028: prdata = pmu_c1_instret_in;
@@ -111,14 +117,19 @@ wire apb_write = psel && penable && pwrite && is_wr_reg;
 
 always @(posedge pclk or negedge preset_n) begin
     if (!preset_n) begin
-        sys_halt_r <= 1'b0;
-        tohost_r   <= 32'd0;
-        scratch_r  <= 32'd0;
+        sys_halt_r   <= 1'b0;
+        tohost_r     <= 32'd0;
+        scratch_r    <= 32'd0;
+        irq_inject_r <= 15'd0;
     end else if (apb_write) begin
         case (reg_off)
             12'h00C: if (pstrb[0]) sys_halt_r <= pwdata[0];
             12'h010: tohost_r  <= mask_merge(tohost_r,  pwdata, pstrb);
             12'h014: scratch_r <= mask_merge(scratch_r, pwdata, pstrb);
+            12'h018: begin
+                if (pstrb[0]) irq_inject_r[7:1]  <= pwdata[7:1];
+                if (pstrb[1]) irq_inject_r[15:8] <= pwdata[15:8];
+            end
             default: ;
         endcase
     end

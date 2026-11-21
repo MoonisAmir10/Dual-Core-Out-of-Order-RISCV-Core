@@ -105,7 +105,7 @@ localparam integer LINE_BITS = DRAM_LINE_BITS;
 
 `include "soc_addr_map.vh"
 localparam integer APB_NUM_SLAVES = 7;
-localparam [15:0]  APB_SLV_MASK   = 16'b0000_0000_0100_0001; // S0=CLINT, S6=SOC_CTRL
+localparam [15:0]  APB_SLV_MASK   = 16'b0000_0000_0100_0011; // S0=CLINT, S1=PLIC, S6=SOC_CTRL
 
 // Core <-> L1I
 wire        imem_req_valid, imem_valid0, imem_valid1;
@@ -137,7 +137,9 @@ wire        apb_s_penable, apb_s_pwrite;
 wire [31:0] apb_s_paddr, apb_s_pwdata;
 wire [3:0]  apb_s_pstrb;
 
-wire        clint_mtip0_u, clint_mtip1_u;
+wire        clint_mtip0, clint_mtip1_u;
+wire        plic_meip0;
+wire [15:1] soc_irq_inject;
 wire        core_halted, soc_sys_halt;
 wire [31:0] soc_tohost_u;
 wire        c1_mmio_rdy_u, c1_mmio_rv_u, c1_mmio_err_u;
@@ -231,7 +233,7 @@ ooo2w_core #(
     .dc_clean_all_req(dc_clean_req), .dc_clean_all_done(dc_clean_done),
     .dc_writes_idle(dc_writes_idle), .dc_any_miss(dc_any_miss),
     .coh_snoop_inv_valid(1'b0), .coh_snoop_inv_line(16'd0),
-    .irq_msip(1'b0), .irq_mtip(1'b0), .irq_meip(1'b0),
+    .irq_msip(clint_msip0), .irq_mtip(clint_mtip0), .irq_meip(plic_meip0),
     .commit0_valid(commit0_valid), .commit0_seq_id(commit0_seq_id),
     .commit0_pc(commit0_pc), .commit0_instr(commit0_instr),
     .commit0_rd_we(commit0_rd_we), .commit0_rd_addr(commit0_rd_addr), .commit0_rd_wdata(commit0_rd_wdata),
@@ -325,9 +327,6 @@ mmio_to_apb4_bridge #(.ID_W(ID_W)) u_apb_bridge (
     .m_pready(apb_m_pready), .m_prdata(apb_m_prdata), .m_pslverr(apb_m_pslverr)
 );
 
-assign apb_s_pready[APB_SLV_PLIC]       = 1'b1;
-assign apb_s_pslverr[APB_SLV_PLIC]      = 1'b1;
-assign apb_s_prdata[APB_SLV_PLIC*32  +: 32] = 32'd0;
 assign apb_s_pready[APB_SLV_GPIO]       = 1'b1;
 assign apb_s_pslverr[APB_SLV_GPIO]      = 1'b1;
 assign apb_s_prdata[APB_SLV_GPIO*32  +: 32] = 32'd0;
@@ -361,13 +360,28 @@ apb4_clint u_clint (
     .prdata(apb_s_prdata[APB_SLV_CLINT*32 +: 32]),
     .pslverr(apb_s_pslverr[APB_SLV_CLINT]),
     .msip0_out(clint_msip0), .msip1_out(clint_msip1),
-    .mtip0_out(clint_mtip0_u), .mtip1_out(clint_mtip1_u), .mtime_out(clint_mtime_u)
+    .mtip0_out(clint_mtip0), .mtip1_out(clint_mtip1_u), .mtime_out(clint_mtime_u)
+);
+
+apb4_plic #(
+    .NUM_SOURCES(16),
+    .NUM_HARTS(1),
+    .PRIO_BITS(3)
+) u_plic (
+    .pclk(clk), .preset_n(reset_n),
+    .psel(apb_s_psel[APB_SLV_PLIC]), .penable(apb_s_penable), .pwrite(apb_s_pwrite),
+    .paddr(apb_s_paddr), .pwdata(apb_s_pwdata), .pstrb(apb_s_pstrb),
+    .pready(apb_s_pready[APB_SLV_PLIC]),
+    .prdata(apb_s_prdata[APB_SLV_PLIC*32 +: 32]),
+    .pslverr(apb_s_pslverr[APB_SLV_PLIC]),
+    .irq_src_in(soc_irq_inject),
+    .meip_out(plic_meip0)
 );
 
 apb4_soc_ctrl #(
     .SOC_ID(32'h2002_0002),
     .NUM_CORES(32'd1),
-    .FEATURE_MASK(32'h0000_0003)
+    .FEATURE_MASK(32'h0000_0007)
 ) u_soc_ctrl (
     .pclk(clk), .preset_n(reset_n),
     .psel(apb_s_psel[APB_SLV_SOC_CTRL]), .penable(apb_s_penable), .pwrite(apb_s_pwrite),
@@ -384,7 +398,8 @@ apb4_soc_ctrl #(
     .pmu_dram_rds_in(pmu_dram_rds),
     .pmu_dram_wrs_in(pmu_dram_wrs),
     .sys_halt_out(soc_sys_halt),
-    .tohost_out(soc_tohost_u)
+    .tohost_out(soc_tohost_u),
+    .irq_inject_out(soc_irq_inject)
 );
 
 l2_cache_shared #(

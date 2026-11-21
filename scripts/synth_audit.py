@@ -37,7 +37,7 @@ INC = f"-I{ROOT / 'rtl' / 'common'} -I{ROOT / 'rtl' / 'coherence'} -I{ROOT / 'rt
 
 RTL_APB = [
     "rtl/bus/mmio_to_apb4_bridge.sv", "rtl/bus/apb4_interconnect.sv",
-    "rtl/periph/apb4_clint.sv", "rtl/periph/apb4_soc_ctrl.sv",
+    "rtl/periph/apb4_clint.sv", "rtl/periph/apb4_plic.sv", "rtl/periph/apb4_soc_ctrl.sv",
 ]
 
 RTL_COMMON = [
@@ -91,6 +91,7 @@ SYNTH_UNITS: List[Tuple[str, str, List[str], str, int, int, str, str]] = [
     ("apb4_bridge",      "mmio_to_apb4_bridge", ["rtl/bus/mmio_to_apb4_bridge.sv"], "", 1, 1, "uncore", "2-to-1 RR Core MMIO -> AMBA APB4 Master Bridge"),
     ("apb4_xbar",        "apb4_interconnect",   ["rtl/bus/apb4_interconnect.sv"],   "", 1, 1, "uncore", "Expandable AMBA APB4 Decoder/Mux (NUM_SLAVES=7)"),
     ("apb4_clint",       "apb4_clint",          ["rtl/periph/apb4_clint.sv"],       "", 1, 1, "uncore", "AMBA APB4 CLINT (mtime, mtimecmp0/1, msip0/1)"),
+    ("apb4_plic",        "apb4_plic",           ["rtl/periph/apb4_plic.sv"],        "", 1, 1, "uncore", "AMBA APB4 RISC-V PLIC (16 src, 2 harts, atomic claim)"),
     ("apb4_soc_ctrl",    "apb4_soc_ctrl",       ["rtl/periph/apb4_soc_ctrl.sv"],    "", 1, 1, "uncore", "AMBA APB4 SoC Ctrl, TOHOST/HALT & Live PMU"),
 ]
 

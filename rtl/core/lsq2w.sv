@@ -282,11 +282,16 @@ reg [31:0]      amo_rs2_r;
 reg [31:0]      amo_rdata_r;
 
 reg             mmio_ld_in_flight;
+reg             mmio_ld_done;
 reg             mmio_st_in_flight;
 reg             mmio_st_done;
 reg             mmio_st_err;
 
-assign mmio_busy = mmio_ld_in_flight || mmio_st_in_flight || mmio_st_done;
+// Keep ROB async-IRQ blocked across the ENTIRE lifetime of an already-issued
+// APB4 MMIO load/store until it commits or flushes (prevents double-Claim/double-Write!)
+assign mmio_busy = mmio_ld_in_flight || mmio_ld_done ||
+                   mmio_st_in_flight || mmio_st_done ||
+                   ((sq_tail != sq_commit_ptr) && sq_mmio_sent[sq_commit_ptr[2:0]]);
 
 // Live EX->EX bypassed addresses & store data
 reg [31:0] lq_addr_eff [0:LQ_DEPTH-1];
@@ -792,6 +797,7 @@ always @(posedge clk or negedge reset_n) begin
         amo_rs2_r         <= 32'd0;
         amo_rdata_r       <= 32'd0;
         mmio_ld_in_flight <= 1'b0;
+        mmio_ld_done      <= 1'b0;
         mmio_st_in_flight <= 1'b0;
         mmio_st_done      <= 1'b0;
         mmio_st_err       <= 1'b0;
@@ -872,8 +878,10 @@ always @(posedge clk or negedge reset_n) begin
                 lq_exc[hit_idx]  <= dc_hit_err;
                 lq_data[hit_idx] <= format_load_data(lq_size[hit_idx], lq_uns[hit_idx],
                                                      lq_addr_eff[hit_idx][1:0], dc_hit_rdata);
-                if (mmio_ld_in_flight)
+                if (mmio_ld_in_flight) begin
                     mmio_ld_in_flight <= 1'b0;
+                    mmio_ld_done      <= 1'b1;
+                end
             end
 
             if (dc_fill_is_amo && amo_in_flight) begin
@@ -897,9 +905,12 @@ always @(posedge clk or negedge reset_n) begin
             amo_done          <= 1'b0;
             amo_exc_r         <= 1'b0;
             mmio_ld_in_flight <= 1'b0;
+            mmio_ld_done      <= 1'b0;
             mmio_st_in_flight <= 1'b0;
             mmio_st_done      <= 1'b0;
             mmio_st_err       <= 1'b0;
+            for (k = 0; k < SQ_DEPTH; k = k + 1)
+                sq_mmio_sent[k] <= 1'b0;
             for (k = 0; k < LQ_DEPTH; k = k + 1) begin
                 if (lq_valid[k]) lq_gen[k] <= lq_gen[k] + 3'd1;
                 lq_valid[k]    <= 1'b0;
@@ -1034,9 +1045,14 @@ always @(posedge clk or negedge reset_n) begin
             //    (with sq_head == sq_commit_ptr), so advance BOTH pointers together!
             if (rob_commit_store) begin
                 sq_commit_ptr <= sq_commit_ptr + 4'd1;
-                if (sq_mmio_sent[sq_commit_idx])
-                    sq_head <= sq_head + 4'd1;
+                if (sq_mmio_sent[sq_commit_idx]) begin
+                    sq_head                     <= sq_head + 4'd1;
+                    sq_mmio_sent[sq_commit_idx] <= 1'b0;
+                end
             end
+
+            if (rob_commit0_load && mmio_ld_done)
+                mmio_ld_done <= 1'b0;
 
             for (k = 0; k < LQ_DEPTH; k = k + 1) begin
                 if (lq_valid[k] &&

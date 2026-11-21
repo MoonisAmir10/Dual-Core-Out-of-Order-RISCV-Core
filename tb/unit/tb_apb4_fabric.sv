@@ -60,6 +60,7 @@ wire [3:0]      s_pstrb;
 wire            msip0, msip1, mtip0, mtip1, sys_halt;
 wire [63:0]     mtime;
 wire [31:0]     tohost;
+wire [15:1]     irq_inject_u;
 
 mmio_to_apb4_bridge #(.ID_W(ID_W)) u_bridge (
     .clk(clk), .reset_n(reset_n),
@@ -105,7 +106,7 @@ apb4_soc_ctrl #(.SOC_ID(32'h2002_0002), .NUM_CORES(32'd2), .FEATURE_MASK(32'h000
     .pmu_cycles_in(32'h0000_1234), .pmu_c0_instret_in(32'h0000_0555), .pmu_c1_instret_in(32'h0000_0666),
     .pmu_coh_c2c_in(32'h0000_0077), .pmu_l2_hits_in(32'h0000_0888), .pmu_l2_misses_in(32'h0000_0099),
     .pmu_dram_rds_in(32'h0000_00AA), .pmu_dram_wrs_in(32'h0000_00BB),
-    .sys_halt_out(sys_halt), .tohost_out(tohost)
+    .sys_halt_out(sys_halt), .tohost_out(tohost), .irq_inject_out(irq_inject_u)
 );
 
 // Synthetic 3-Wait-State Slave on Slot 2 (tests PREADY=0 hold & signal stability!)
