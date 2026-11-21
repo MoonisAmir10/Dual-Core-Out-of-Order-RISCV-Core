@@ -20,6 +20,7 @@ module single_ooo2w_soc #(
     parameter integer ICACHE_SETS     = 128, // 4 KB L1I
     parameter integer DCACHE_SETS     = 128, // 4 KB L1D
     parameter integer L2_SETS_BANK    = 256, // 256 x 4 x 16B x 2 banks = 32 KB L2
+    parameter integer DRAM_LINE_BITS  = 14,  // 256 KB unified DRAM (override for synth)
     parameter integer ENABLE_PREFETCH = 1
 ) (
     input  wire         clk,
@@ -100,7 +101,7 @@ module single_ooo2w_soc #(
 localparam integer AWIDTH    = 20;
 localparam integer ID_W      = 7;
 localparam integer LADDR_W   = AWIDTH - 4; // 16
-localparam integer LINE_BITS = 14;         // 256 KB unified RAM
+localparam integer LINE_BITS = DRAM_LINE_BITS;
 
 // Core <-> L1I
 wire        imem_req_valid, imem_valid0, imem_valid1;
