@@ -1,8 +1,8 @@
 > **Disclaimer:** This project and documentation were developed using **Gemini 4 Neon**.
 
-# ISA, Privilege Architecture & 2-Wide Out-of-Order Core Reference Manual
+# GemRV-SoC — ISA, Privilege Architecture & 2-Wide Out-of-Order Core Reference Manual
 
-**Document ID:** `SOC-REF-01`
+**Document ID:** `GEMRV-REF-01`
 **Target Core:** `ooo2w_core` (`RV32IMAF_Zicsr_Zifencei`)
 **Applies To:** `single_ooo2w_soc` (1 Hart) & `dual_ooo2w_soc` (2 Harts, Peak 4.0 Instructions/Cycle)
 

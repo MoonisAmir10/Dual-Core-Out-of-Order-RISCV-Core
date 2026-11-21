@@ -1,8 +1,8 @@
 > **Disclaimer:** This project (RTL architecture, verification infrastructure, formal proofs, bare-metal C/HAL software, benchmarks, and documentation) was developed using **Gemini 4 Neon**.
 
-# Dual-Core 2-Wide Out-of-Order RISC-V SoC (`RV32IMAF_Zicsr_Zifencei`)
+# GemRV-SoC — Dual-Core 2-Wide Out-of-Order RISC-V SoC (`RV32IMAF_Zicsr_Zifencei`)
 
-A synthesizable, formally verified **Dual-Core 2-Wide Superscalar Out-of-Order RISC-V System-on-Chip** (**peak 4.0 instructions/cycle chip throughput**) featuring full **IEEE-754-2008 `RV32F` non-blocking floating-point pipelines**, **precise M-mode exceptions & traps**, a **dual-tier AMBA AXI4 + expandable AMBA APB4 bus fabric**, a **3-master MOESI cache-coherent memory hierarchy** (`Core 0 + Core 1 + 2-Channel I/O-Coherent AXI4 DMA`), a **standard RISC-V Dual-Core PLIC + CLINT interrupt subsystem**, a **complete peripheral suite (GPIO, 16-FIFO 8N1 UART, 2-Ch Timer/PWM, SoC Control/PMU)**, and a **bare-metal C Hardware Abstraction Layer (`sw/hal/`)**.
+**GemRV-SoC** is a synthesizable, formally verified **Dual-Core 2-Wide Superscalar Out-of-Order RISC-V System-on-Chip** (**peak 4.0 instructions/cycle chip throughput**) featuring full **IEEE-754-2008 `RV32F` non-blocking floating-point pipelines**, **precise M-mode exceptions & traps**, a **dual-tier AMBA AXI4 + expandable AMBA APB4 bus fabric**, a **3-master MOESI cache-coherent memory hierarchy** (`Core 0 + Core 1 + 2-Channel I/O-Coherent AXI4 DMA`), a **standard RISC-V Dual-Core PLIC + CLINT interrupt subsystem**, a **complete peripheral suite (GPIO, 16-FIFO 8N1 UART, 2-Ch Timer/PWM, SoC Control/PMU)**, and a **bare-metal C Hardware Abstraction Layer (`sw/hal/`)**.
 
 ### Standalone Architecture & Programmer Reference Manuals
 - **[`docs/01_ISA_and_Core_Manual.md`](docs/01_ISA_and_Core_Manual.md)** — Full `RV32IMAF_Zicsr_Zifencei` ISA, M-Mode Privilege/Trap/CSR Reference, IEEE-754 FPU Architecture, and 2-Wide OoO Pipeline Microarchitecture.

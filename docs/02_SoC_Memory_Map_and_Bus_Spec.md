@@ -1,8 +1,8 @@
 > **Disclaimer:** This project and documentation were developed using **Gemini 4 Neon**.
 
-# SoC Physical Memory Map, AMBA Bus Architecture & 3-Master MOESI Coherence Specification
+# GemRV-SoC — Physical Memory Map, AMBA Bus Architecture & 3-Master MOESI Coherence Specification
 
-**Document ID:** `SOC-REF-02`
+**Document ID:** `GEMRV-REF-02`
 **Applies To:** `dual_ooo2w_soc` (2 Cores + AMBA AXI4 Coherent DMA + AMBA APB4) & `single_ooo2w_soc` (1 Core + AMBA APB4)
 **Single Source of Truth:** [`rtl/soc/soc_addr_map.vh`](../rtl/soc/soc_addr_map.vh) & [`sw/hal/soc_regs.h`](../sw/hal/soc_regs.h)
 

@@ -1,8 +1,8 @@
 > **Disclaimer:** This project and documentation were developed using **Gemini 4 Neon**.
 
-# Peripherals Register Reference & Bare-Metal C HAL Programmer's Guide
+# GemRV-SoC — Peripherals Register Reference & Bare-Metal C HAL Programmer's Guide
 
-**Document ID:** `SOC-REF-03`
+**Document ID:** `GEMRV-REF-03`
 **HAL Headers:** [`sw/hal/`](../sw/hal/) (`soc_regs.h`, `hal_irq.h`, `hal_clint.h`, `hal_plic.h`, `hal_gpio.h`, `hal_uart.h`, `hal_dma.h`, `hal_timer.h`)
 **Runtime Startup & Trap Trampoline:** [`sw/common/crt0.S`](../sw/common/crt0.S), [`sw/common/trap.S`](../sw/common/trap.S), [`sw/common/link.ld`](../sw/common/link.ld), [`sw/common/sync.h`](../sw/common/sync.h)
 

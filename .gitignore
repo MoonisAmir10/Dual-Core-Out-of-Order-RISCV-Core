@@ -15,3 +15,5 @@ __pycache__/
 # Local planning documents
 implementation_plan.md
 upgrade_plan.md
+fpga_plan.md
+fpga_hardware_datasheet_notes.md
