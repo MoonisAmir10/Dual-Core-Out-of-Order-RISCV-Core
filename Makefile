@@ -12,10 +12,11 @@ RISCV_OBJCOPY := /usr/bin/riscv64-unknown-elf-objcopy
 RISCV_OBJDUMP := /usr/bin/riscv64-unknown-elf-objdump
 
 BUILD_DIR := build
-INC_FLAGS := -Irtl/common -Irtl/coherence -Irtl/soc
+INC_FLAGS := -Irtl/common -Irtl/coherence -Irtl/soc -Irtl/fpu
 
 RTL_COMMON := rtl/common/alu.v rtl/common/branch_comp.v rtl/common/imm_gen.v \
               rtl/common/decoder.sv rtl/common/mul_unit.sv rtl/common/div_unit.sv
+RTL_FPU    := rtl/fpu/fpu_fma_pipe.sv rtl/fpu/fpu_div_sqrt.sv rtl/fpu/fpu_misc.sv
 RTL_MEM    := rtl/mem/icache_2w.sv rtl/mem/dcache_nb.sv rtl/mem/mem_arb_2to1.sv \
               rtl/mem/main_memory_nb.sv rtl/mem/l2_bank.sv rtl/mem/l2_cache_shared.sv \
               rtl/mem/main_memory_dram.sv
@@ -38,17 +39,17 @@ V_BUILD := --binary --assert -Wall $(INC_FLAGS) -Wno-UNUSEDSIGNAL -Wno-UNUSEDPAR
 CFLAGS_BASE := -march=rv32ima -mabi=ilp32 -O2 -ffreestanding -nostdlib -nostartfiles \
                -Wall -Wextra -Isw/common -T sw/common/link.ld
 
-.PHONY: all lint-phase0 lint-phase1 lint-phase2 lint-phase3 lint-phase4 lint-phase-u2 lint-phase-u3 lint-phase-u4 \
-        synth-phase0 synth-phase1 synth-phase2 synth-phase3 synth-phase4 synth-phase-u2 synth-phase-u3 synth-phase-u4 synth-phase7 \
+.PHONY: all lint-phase0 lint-phase1 lint-phase2 lint-phase3 lint-phase4 lint-phase-u2 lint-phase-u3 lint-phase-u4 lint-phase-u5 \
+        synth-phase0 synth-phase1 synth-phase2 synth-phase3 synth-phase4 synth-phase-u2 synth-phase-u3 synth-phase-u4 synth-phase-u5 synth-phase7 \
         test-phase0-unit test-phase1-unit test-phase2-unit test-phase3-unit formal-phase3 \
         test-phase0-asm test-phase0-c-build test-phase0-baseline test-phase1-v2 test-phase2-l2 \
-        test-phase4-litmus test-phase5-fuzz test-phase6-bench test-phase-u1 test-phase-u2 test-phase-u3 test-phase-u4 clean
+        test-phase4-litmus test-phase5-fuzz test-phase6-bench test-phase-u1 test-phase-u2 test-phase-u3 test-phase-u4 test-phase-u5 clean
 
-all: lint-phase0 lint-phase1 lint-phase2 lint-phase3 lint-phase4 lint-phase-u2 lint-phase-u3 lint-phase-u4 \
-     synth-phase0 synth-phase1 synth-phase2 synth-phase3 synth-phase4 synth-phase-u2 synth-phase-u3 synth-phase-u4 synth-phase7 \
+all: lint-phase0 lint-phase1 lint-phase2 lint-phase3 lint-phase4 lint-phase-u2 lint-phase-u3 lint-phase-u4 lint-phase-u5 \
+     synth-phase0 synth-phase1 synth-phase2 synth-phase3 synth-phase4 synth-phase-u2 synth-phase-u3 synth-phase-u4 synth-phase-u5 synth-phase7 \
      test-phase0-unit test-phase1-unit test-phase2-unit test-phase3-unit formal-phase3 \
      test-phase0-asm test-phase0-c-build test-phase0-baseline test-phase1-v2 test-phase2-l2 \
-     test-phase4-litmus test-phase5-fuzz test-phase6-bench test-phase-u1 test-phase-u2 test-phase-u3 test-phase-u4
+     test-phase4-litmus test-phase5-fuzz test-phase6-bench test-phase-u1 test-phase-u2 test-phase-u3 test-phase-u4 test-phase-u5
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -98,6 +99,11 @@ lint-phase-u4:
 	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_LINT) --top-module apb4_uart rtl/periph/apb4_uart.sv
 	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_LINT) --top-module apb4_timer_pwm rtl/periph/apb4_timer_pwm.sv
 
+lint-phase-u5:
+	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_LINT) --top-module fpu_fma_pipe rtl/fpu/fpu_fma_pipe.sv
+	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_LINT) --top-module fpu_div_sqrt rtl/fpu/fpu_div_sqrt.sv
+	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_LINT) --top-module fpu_misc rtl/fpu/fpu_misc.sv
+
 synth-phase0:
 	$(YOSYS) -q -p "read_verilog -sv $(INC_FLAGS) rtl/common/decoder.sv; hierarchy -check -top decoder; proc; opt; check -assert"
 	$(YOSYS) -q -p "read_verilog -sv $(INC_FLAGS) rtl/core/csr_unit.sv; hierarchy -check -top csr_unit; proc; opt; check -assert"
@@ -141,6 +147,12 @@ synth-phase-u4:
 	$(YOSYS) -q -p "read_verilog -sv $(INC_FLAGS) rtl/periph/apb4_uart.sv; hierarchy -check -top apb4_uart; proc; opt; check -assert; scc -expect 0"
 	$(YOSYS) -q -p "read_verilog -sv $(INC_FLAGS) rtl/periph/apb4_timer_pwm.sv; hierarchy -check -top apb4_timer_pwm; proc; opt; check -assert; scc -expect 0"
 	@echo "PASS [synth-phase-u4]: Yosys check -assert + scc -expect 0 passed on apb4_gpio, apb4_uart & apb4_timer_pwm!"
+
+synth-phase-u5:
+	$(YOSYS) -q -p "read_verilog -sv $(INC_FLAGS) rtl/fpu/fpu_fma_pipe.sv; hierarchy -check -top fpu_fma_pipe; proc; opt; check -assert; scc -expect 0"
+	$(YOSYS) -q -p "read_verilog -sv $(INC_FLAGS) rtl/fpu/fpu_div_sqrt.sv; hierarchy -check -top fpu_div_sqrt; proc; opt; check -assert; scc -expect 0"
+	$(YOSYS) -q -p "read_verilog -sv $(INC_FLAGS) rtl/fpu/fpu_misc.sv; hierarchy -check -top fpu_misc; proc; opt; check -assert; scc -expect 0"
+	@echo "PASS [synth-phase-u5]: Yosys check -assert + scc -expect 0 passed on fpu_fma_pipe, fpu_div_sqrt & fpu_misc!"
 
 synth-phase7: $(BUILD_DIR)
 	$(PYTHON) scripts/synth_audit.py
@@ -291,6 +303,11 @@ test-phase-u4: $(BUILD_DIR)
 	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_BUILD) -GCORE_ID=0 -GDRAM_LATENCY=16 -GL2_HIT_LAT=3 -GENABLE_PREFETCH=1 --Mdir $(BUILD_DIR)/v_p2_c0 -o Vp2_c0 --top-module tb_single_ooo2w_soc $(RTL_COMMON) $(RTL_MEM) $(RTL_CORE) $(RTL_P2_SOC) tb/common/ooo_trace_mon2w.sv tb/soc/tb_single_ooo2w_soc.sv
 	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_BUILD) -GDRAM_LATENCY=16 -GL2_HIT_LAT=3 -GENABLE_PREFETCH=1 -GENABLE_MOESI_O=1 -GENABLE_SNOOP_REPLAY=1 --Mdir $(BUILD_DIR)/v_dual_soc -o Vdual_soc --top-module tb_dual_ooo2w_soc $(RTL_COMMON) $(RTL_MEM) $(RTL_COH) $(RTL_CORE) $(RTL_P4_SOC) tb/unit/coh_checker.sv tb/soc/tb_dual_ooo2w_soc.sv
 	$(PYTHON) scripts/test_phase_u4_periph.py
+
+test-phase-u5: $(BUILD_DIR)
+	$(IVERILOG) -g2012 $(INC_FLAGS) -o $(BUILD_DIR)/tb_fpu_ieee754.vvp $(RTL_FPU) tb/unit/tb_fpu_ieee754.sv
+	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_BUILD) --Mdir $(BUILD_DIR)/v_tb_fpu -o Vtb_fpu --top-module tb_fpu_ieee754 $(RTL_FPU) tb/unit/tb_fpu_ieee754.sv
+	$(PYTHON) scripts/test_phase_u5_fpu.py
 
 clean:
 	rm -rf $(BUILD_DIR)

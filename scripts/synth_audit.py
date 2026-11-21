@@ -33,7 +33,7 @@ from typing import Dict, List, Tuple
 ROOT = Path(__file__).resolve().parent.parent
 BUILD = ROOT / "build" / "phase7_synth"
 YOSYS = "/home/moonis/auto_job_seeker/.eda_tools/envs/dft/bin/yosys"
-INC = f"-I{ROOT / 'rtl' / 'common'} -I{ROOT / 'rtl' / 'coherence'} -I{ROOT / 'rtl' / 'soc'}"
+INC = f"-I{ROOT / 'rtl' / 'common'} -I{ROOT / 'rtl' / 'coherence'} -I{ROOT / 'rtl' / 'soc'} -I{ROOT / 'rtl' / 'fpu'}"
 
 RTL_APB = [
     "rtl/bus/mmio_to_apb4_bridge.sv", "rtl/bus/apb4_interconnect.sv",
@@ -82,6 +82,9 @@ SYNTH_UNITS: List[Tuple[str, str, List[str], str, int, int, str, str]] = [
     ("branch_comp",      "branch_comp",      ["rtl/common/branch_comp.v"],     "", 1, 2, "core", "Branch Comparator"),
     ("mul_unit",         "mul_unit",         ["rtl/common/mul_unit.sv"],       "", 1, 2, "core", "3-Stage Pipelined 32x32 RV32M Multiplier"),
     ("div_unit",         "div_unit",         ["rtl/common/div_unit.sv"],       "", 1, 2, "core", "Radix-4 Early-Out RV32M Divider"),
+    ("fpu_fma_pipe",     "fpu_fma_pipe",     ["rtl/fpu/fpu_fma_pipe.sv"],      "", 1, 2, "core", "4-Stage II=1 IEEE-754 Single-Precision FMA Pipeline"),
+    ("fpu_div_sqrt",     "fpu_div_sqrt",     ["rtl/fpu/fpu_div_sqrt.sv"],      "", 1, 2, "core", "Non-Blocking Radix-2 IEEE-754 FDIV.S & FSQRT.S Unit"),
+    ("fpu_misc",         "fpu_misc",         ["rtl/fpu/fpu_misc.sv"],          "", 1, 2, "core", "1-Cycle IEEE-754 FSGNJ/FMINMAX/CMP/FCLASS/FCVT Unit"),
     ("csr_unit",         "csr_unit",         ["rtl/core/csr_unit.sv"],         "", 1, 2, "core", "Zicsr Unit (mhartid, 64b mcycle/minstret)"),
     # --- Private L1 Caches, MOESI Crossbar, Shared L2, CLINT ---
     ("icache_2w",        "icache_2w",        ["rtl/mem/icache_2w.sv"],         "-chparam NUM_SETS 8", 1, 2, "l1", "2-Way L1I Ctrl+Tag+NextLinePF (8s synth; 4KB arch)"),
