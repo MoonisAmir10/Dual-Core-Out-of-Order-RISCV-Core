@@ -96,7 +96,7 @@ module dual_ooo2w_soc #(
 
     // -------------------- Global Coherence Bus Trace & Checker Hooks --------------------
     output wire         bus_evt_valid,
-    output wire         bus_evt_src,
+    output wire [1:0]   bus_evt_src,
     output wire [1:0]   bus_evt_op,
     output wire [15:0]  bus_evt_laddr,
     output wire         bus_evt_c2c,
@@ -108,6 +108,9 @@ module dual_ooo2w_soc #(
     output wire         d1_wr_commit_valid,
     output wire [15:0]  d1_wr_commit_laddr,
     output wire [127:0] d1_wr_commit_data,
+    output wire         dma_wr_commit_valid,
+    output wire [15:0]  dma_wr_commit_laddr,
+    output wire [127:0] dma_wr_commit_data,
     output wire         d0_idle,
     output wire         d1_idle,
     output wire         coh_idle,
@@ -157,6 +160,8 @@ module dual_ooo2w_soc #(
     output reg  [31:0]  pmu_coh_inval,
     output reg  [31:0]  pmu_coh_mesi_wb,
     output reg  [31:0]  pmu_coh_e2m,
+    output reg  [31:0]  pmu_coh_dma_rds,
+    output reg  [31:0]  pmu_coh_dma_wrs,
     output reg  [31:0]  pmu_l2_hits,
     output reg  [31:0]  pmu_l2_misses,
     output reg  [31:0]  pmu_l2_wbs,
@@ -172,7 +177,7 @@ localparam integer LINE_BITS = DRAM_LINE_BITS;
 
 `include "soc_addr_map.vh"
 localparam integer APB_NUM_SLAVES = 7;
-localparam [15:0]  APB_SLV_MASK   = 16'b0000_0000_0110_1111; // S0=CLINT, S1=PLIC, S2=GPIO, S3=UART, S5=TIMER, S6=SOC_CTRL
+localparam [15:0]  APB_SLV_MASK   = 16'b0000_0000_0111_1111; // S0=CLINT, S1=PLIC, S2=GPIO, S3=UART, S4=DMA, S5=TIMER, S6=SOC_CTRL
 
 wire        soc_sys_halt;
 wire [31:0] soc_tohost_u;
@@ -263,9 +268,9 @@ wire [3:0]  apb_s_pstrb;
 
 wire        clint_mtip0, clint_mtip1;
 wire [1:0]  plic_meip;
-wire        gpio_irq, uart_rx_irq, uart_tx_irq, timer_irq0, timer_irq1;
+wire        gpio_irq, uart_rx_irq, uart_tx_irq, dma_ch0_irq, dma_ch1_irq, timer_irq0, timer_irq1;
 wire [15:1] soc_irq_inject;
-wire [15:1] plic_irq_src = {8'd0, timer_irq1, timer_irq0, 2'b00, uart_tx_irq, uart_rx_irq, gpio_irq} | soc_irq_inject;
+wire [15:1] plic_irq_src = {8'd0, timer_irq1, timer_irq0, dma_ch1_irq, dma_ch0_irq, uart_tx_irq, uart_rx_irq, gpio_irq} | soc_irq_inject;
 wire [63:0] clint_mtime_u;
 
 assign c0_dc_rdy = c0_dc_is_mmio ? c0_mmio_rdy : d0_req_rdy;
@@ -335,8 +340,31 @@ wire [1:0]         dram_rd_id, dram_rr_id;
 wire [127:0]       dram_rr_dat, dram_wr_dat;
 
 wire               coh_gets_p, coh_getm_p, coh_upg_p, coh_c2c_p, coh_inv_p, coh_mwb_p;
+wire               coh_dma_rd_p, coh_dma_wr_p;
 wire [1:0]         l2_hits_p, l2_misses_p, l2_wbs_p;
 wire               l2_bc_p, dram_rd_p, dram_wr_p;
+
+// AMBA AXI4 128-bit Coherent DMA Master <-> AXI4-to-MOESI Bridge Wires (Phase U7)
+wire               dma_axi_arvalid, dma_axi_arready, dma_axi_rvalid, dma_axi_rready, dma_axi_rlast;
+wire [31:0]        dma_axi_araddr;
+wire [7:0]         dma_axi_arlen;
+wire [2:0]         dma_axi_arsize;
+wire [1:0]         dma_axi_arburst, dma_axi_rresp;
+wire [127:0]       dma_axi_rdata;
+
+wire               dma_axi_awvalid, dma_axi_awready, dma_axi_wvalid, dma_axi_wready, dma_axi_wlast;
+wire               dma_axi_bvalid, dma_axi_bready;
+wire [31:0]        dma_axi_awaddr;
+wire [7:0]         dma_axi_awlen;
+wire [2:0]         dma_axi_awsize;
+wire [1:0]         dma_axi_awburst, dma_axi_bresp;
+wire [127:0]       dma_axi_wdata;
+wire [15:0]        dma_axi_wstrb;
+
+wire               dma_coh_req_v, dma_coh_req_rdy, dma_coh_req_we, dma_coh_resp_v;
+wire [LADDR_W-1:0] dma_coh_req_la;
+wire [127:0]       dma_coh_req_wd, dma_coh_resp_rd;
+wire [15:0]        dma_coh_req_ws;
 
 // ============================================================================
 // 5. Core 0 Subsystem (ooo2w_core #0 + icache_2w #0 + dcache_nb_coh #0)
@@ -548,10 +576,6 @@ mmio_to_apb4_bridge #(.ID_W(ID_W)) u_apb_bridge (
     .m_pready(apb_m_pready), .m_prdata(apb_m_prdata), .m_pslverr(apb_m_pslverr)
 );
 
-assign apb_s_pready[APB_SLV_DMA]        = 1'b1;
-assign apb_s_pslverr[APB_SLV_DMA]       = 1'b1;
-assign apb_s_prdata[APB_SLV_DMA*32   +: 32] = 32'd0;
-
 apb4_interconnect #(
     .NUM_SLAVES(APB_NUM_SLAVES),
     .SLAVE_PRESENT(APB_SLV_MASK)
@@ -612,6 +636,49 @@ apb4_uart u_uart (
     .rx_irq_out(uart_rx_irq), .tx_irq_out(uart_tx_irq)
 );
 
+dma_axi4_coh u_dma (
+    .clk(clk), .reset_n(reset_n),
+    .psel(apb_s_psel[APB_SLV_DMA]), .penable(apb_s_penable), .pwrite(apb_s_pwrite),
+    .paddr(apb_s_paddr), .pwdata(apb_s_pwdata), .pstrb(apb_s_pstrb),
+    .pready(apb_s_pready[APB_SLV_DMA]),
+    .prdata(apb_s_prdata[APB_SLV_DMA*32 +: 32]),
+    .pslverr(apb_s_pslverr[APB_SLV_DMA]),
+    .m_axi_arvalid(dma_axi_arvalid), .m_axi_arready(dma_axi_arready),
+    .m_axi_araddr(dma_axi_araddr), .m_axi_arlen(dma_axi_arlen),
+    .m_axi_arsize(dma_axi_arsize), .m_axi_arburst(dma_axi_arburst),
+    .m_axi_rvalid(dma_axi_rvalid), .m_axi_rready(dma_axi_rready),
+    .m_axi_rdata(dma_axi_rdata), .m_axi_rresp(dma_axi_rresp), .m_axi_rlast(dma_axi_rlast),
+    .m_axi_awvalid(dma_axi_awvalid), .m_axi_awready(dma_axi_awready),
+    .m_axi_awaddr(dma_axi_awaddr), .m_axi_awlen(dma_axi_awlen),
+    .m_axi_awsize(dma_axi_awsize), .m_axi_awburst(dma_axi_awburst),
+    .m_axi_wvalid(dma_axi_wvalid), .m_axi_wready(dma_axi_wready),
+    .m_axi_wdata(dma_axi_wdata), .m_axi_wstrb(dma_axi_wstrb), .m_axi_wlast(dma_axi_wlast),
+    .m_axi_bvalid(dma_axi_bvalid), .m_axi_bready(dma_axi_bready), .m_axi_bresp(dma_axi_bresp),
+    .irq_ch0_out(dma_ch0_irq), .irq_ch1_out(dma_ch1_irq)
+);
+
+axi4_to_coh_bridge #(
+    .LADDR_W(LADDR_W),
+    .RAM_SIZE_BYTES(SOC_RAM_SIZE)
+) u_axi_coh (
+    .clk(clk), .reset_n(reset_n),
+    .s_axi_arvalid(dma_axi_arvalid), .s_axi_arready(dma_axi_arready),
+    .s_axi_araddr(dma_axi_araddr), .s_axi_arlen(dma_axi_arlen),
+    .s_axi_arsize(dma_axi_arsize), .s_axi_arburst(dma_axi_arburst),
+    .s_axi_rvalid(dma_axi_rvalid), .s_axi_rready(dma_axi_rready),
+    .s_axi_rdata(dma_axi_rdata), .s_axi_rresp(dma_axi_rresp), .s_axi_rlast(dma_axi_rlast),
+    .s_axi_awvalid(dma_axi_awvalid), .s_axi_awready(dma_axi_awready),
+    .s_axi_awaddr(dma_axi_awaddr), .s_axi_awlen(dma_axi_awlen),
+    .s_axi_awsize(dma_axi_awsize), .s_axi_awburst(dma_axi_awburst),
+    .s_axi_wvalid(dma_axi_wvalid), .s_axi_wready(dma_axi_wready),
+    .s_axi_wdata(dma_axi_wdata), .s_axi_wstrb(dma_axi_wstrb), .s_axi_wlast(dma_axi_wlast),
+    .s_axi_bvalid(dma_axi_bvalid), .s_axi_bready(dma_axi_bready), .s_axi_bresp(dma_axi_bresp),
+    .dma_coh_req_valid(dma_coh_req_v), .dma_coh_req_ready(dma_coh_req_rdy),
+    .dma_coh_req_is_write(dma_coh_req_we), .dma_coh_req_laddr(dma_coh_req_la),
+    .dma_coh_req_wdata(dma_coh_req_wd), .dma_coh_req_wstrb(dma_coh_req_ws),
+    .dma_coh_resp_valid(dma_coh_resp_v), .dma_coh_resp_rdata(dma_coh_resp_rd)
+);
+
 apb4_timer_pwm u_timer (
     .pclk(clk), .preset_n(reset_n),
     .psel(apb_s_psel[APB_SLV_TIMER]), .penable(apb_s_penable), .pwrite(apb_s_pwrite),
@@ -625,7 +692,7 @@ apb4_timer_pwm u_timer (
 apb4_soc_ctrl #(
     .SOC_ID(32'h2002_0002),
     .NUM_CORES(32'd2),
-    .FEATURE_MASK(32'h0000_001F)
+    .FEATURE_MASK(32'h0000_003F)
 ) u_soc_ctrl (
     .pclk(clk), .preset_n(reset_n),
     .psel(apb_s_psel[APB_SLV_SOC_CTRL]), .penable(apb_s_penable), .pwrite(apb_s_pwrite),
@@ -664,6 +731,12 @@ coh_interconnect #(
     .d1_wb_valid(d1_wb_v), .d1_wb_ready(d1_wb_rdy), .d1_wb_laddr(d1_wb_la), .d1_wb_data(d1_wb_dat),
     .d1_coh_resp_valid(d1_resp_v), .d1_coh_resp_id(d1_resp_id), .d1_coh_resp_data(d1_resp_dat),
     .d1_coh_resp_shared(d1_resp_sh), .d1_coh_resp_from_c2c(d1_resp_c2c), .d1_coh_resp_upgrade_ack(d1_resp_upg),
+    .dma_coh_req_valid(dma_coh_req_v), .dma_coh_req_ready(dma_coh_req_rdy),
+    .dma_coh_req_is_write(dma_coh_req_we), .dma_coh_req_laddr(dma_coh_req_la),
+    .dma_coh_req_wdata(dma_coh_req_wd), .dma_coh_req_wstrb(dma_coh_req_ws),
+    .dma_coh_resp_valid(dma_coh_resp_v), .dma_coh_resp_rdata(dma_coh_resp_rd),
+    .dma_wr_commit_valid(dma_wr_commit_valid), .dma_wr_commit_laddr(dma_wr_commit_laddr),
+    .dma_wr_commit_data(dma_wr_commit_data),
     .i0_rd_valid(i0_rd_v), .i0_rd_ready(i0_rd_rdy), .i0_rd_laddr(i0_rd_la),
     .i0_rresp_valid(i0_rr_v), .i0_rresp_data(i0_rr_dat),
     .i1_rd_valid(i1_rd_v), .i1_rd_ready(i1_rd_rdy), .i1_rd_laddr(i1_rd_la),
@@ -678,7 +751,8 @@ coh_interconnect #(
     .bus_evt_laddr(bus_evt_laddr), .bus_evt_c2c(bus_evt_c2c), .bus_evt_shared(bus_evt_shared),
     .coh_idle(coh_idle),
     .pmu_coh_gets(coh_gets_p), .pmu_coh_getm(coh_getm_p), .pmu_coh_upgrade(coh_upg_p),
-    .pmu_coh_c2c_dirty(coh_c2c_p), .pmu_coh_inval(coh_inv_p), .pmu_coh_mesi_wb(coh_mwb_p)
+    .pmu_coh_c2c_dirty(coh_c2c_p), .pmu_coh_inval(coh_inv_p), .pmu_coh_mesi_wb(coh_mwb_p),
+    .pmu_coh_dma_rd(coh_dma_rd_p), .pmu_coh_dma_wr(coh_dma_wr_p)
 );
 
 l2_cache_shared #(
@@ -744,6 +818,8 @@ always @(posedge clk or negedge reset_n) begin
         pmu_coh_inval         <= 32'd0;
         pmu_coh_mesi_wb       <= 32'd0;
         pmu_coh_e2m           <= 32'd0;
+        pmu_coh_dma_rds       <= 32'd0;
+        pmu_coh_dma_wrs       <= 32'd0;
         pmu_l2_hits           <= 32'd0;
         pmu_l2_misses         <= 32'd0;
         pmu_l2_wbs            <= 32'd0;
@@ -777,7 +853,9 @@ always @(posedge clk or negedge reset_n) begin
         if (coh_upg_p)  pmu_coh_upgrade   <= pmu_coh_upgrade + 32'd1;
         if (coh_c2c_p)  pmu_coh_c2c_dirty <= pmu_coh_c2c_dirty + 32'd1;
         if (coh_inv_p)  pmu_coh_inval     <= pmu_coh_inval + 32'd1;
-        if (coh_mwb_p)  pmu_coh_mesi_wb   <= pmu_coh_mesi_wb + 32'd1;
+        if (coh_mwb_p)    pmu_coh_mesi_wb <= pmu_coh_mesi_wb + 32'd1;
+        if (coh_dma_rd_p) pmu_coh_dma_rds <= pmu_coh_dma_rds + 32'd1;
+        if (coh_dma_wr_p) pmu_coh_dma_wrs <= pmu_coh_dma_wrs + 32'd1;
         pmu_coh_e2m           <= pmu_coh_e2m + {31'd0, d0_e2m_p} + {31'd0, d1_e2m_p};
         pmu_l2_hits           <= pmu_l2_hits   + {30'd0, l2_hits_p};
         pmu_l2_misses         <= pmu_l2_misses + {30'd0, l2_misses_p};

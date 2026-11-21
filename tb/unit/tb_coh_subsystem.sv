@@ -118,12 +118,16 @@ wire [LADDR_W-1:0] dram_rd_la, dram_wr_la;
 wire [1:0]         dram_rd_id, dram_rr_id;
 wire [127:0]       dram_rr_dat, dram_wr_dat;
 
-wire               bus_evt_v, bus_evt_src, bus_evt_c2c, bus_evt_sh;
-wire [1:0]         bus_evt_op;
+wire               bus_evt_v, bus_evt_c2c, bus_evt_sh;
+wire [1:0]         bus_evt_src, bus_evt_op;
 wire [LADDR_W-1:0] bus_evt_la;
 wire               coh_idle, l2_idle, l2_bc, dram_rd_p, dram_wr_p;
 wire [1:0]         l2_hits_p, l2_misses_p, l2_wbs_p;
 wire               pmu_gets, pmu_getm, pmu_upg, pmu_c2c, pmu_inval, pmu_mesi_wb;
+wire               pmu_dma_rd_u, pmu_dma_wr_u;
+wire               dma_rdy_u, dma_rv_u, dma_wv_u;
+wire [LADDR_W-1:0] dma_wla_u;
+wire [127:0]       dma_rd_u, dma_wdat_u;
 wire               i0_rdy_u, i0_rv_u, i1_rdy_u, i1_rv_u;
 wire [127:0]       i0_rd_u, i1_rd_u;
 
@@ -204,6 +208,10 @@ coh_interconnect #(
     .d1_wb_valid(d1_wb_v), .d1_wb_ready(d1_wb_rdy), .d1_wb_laddr(d1_wb_la), .d1_wb_data(d1_wb_dat),
     .d1_coh_resp_valid(d1_resp_v), .d1_coh_resp_id(d1_resp_id), .d1_coh_resp_data(d1_resp_dat),
     .d1_coh_resp_shared(d1_resp_sh), .d1_coh_resp_from_c2c(d1_resp_c2c), .d1_coh_resp_upgrade_ack(d1_resp_upg),
+    .dma_coh_req_valid(1'b0), .dma_coh_req_ready(dma_rdy_u), .dma_coh_req_is_write(1'b0),
+    .dma_coh_req_laddr(16'd0), .dma_coh_req_wdata(128'd0), .dma_coh_req_wstrb(16'd0),
+    .dma_coh_resp_valid(dma_rv_u), .dma_coh_resp_rdata(dma_rd_u),
+    .dma_wr_commit_valid(dma_wv_u), .dma_wr_commit_laddr(dma_wla_u), .dma_wr_commit_data(dma_wdat_u),
     .i0_rd_valid(1'b0), .i0_rd_ready(i0_rdy_u), .i0_rd_laddr(16'd0), .i0_rresp_valid(i0_rv_u), .i0_rresp_data(i0_rd_u),
     .i1_rd_valid(1'b0), .i1_rd_ready(i1_rdy_u), .i1_rd_laddr(16'd0), .i1_rresp_valid(i1_rv_u), .i1_rresp_data(i1_rd_u),
     .l2_m0_req_valid(l2_m0_v), .l2_m0_req_ready(l2_m0_rdy), .l2_m0_req_is_write(l2_m0_we),
@@ -216,7 +224,8 @@ coh_interconnect #(
     .bus_evt_laddr(bus_evt_la), .bus_evt_c2c(bus_evt_c2c), .bus_evt_shared(bus_evt_sh),
     .coh_idle(coh_idle),
     .pmu_coh_gets(pmu_gets), .pmu_coh_getm(pmu_getm), .pmu_coh_upgrade(pmu_upg),
-    .pmu_coh_c2c_dirty(pmu_c2c), .pmu_coh_inval(pmu_inval), .pmu_coh_mesi_wb(pmu_mesi_wb)
+    .pmu_coh_c2c_dirty(pmu_c2c), .pmu_coh_inval(pmu_inval), .pmu_coh_mesi_wb(pmu_mesi_wb),
+    .pmu_coh_dma_rd(pmu_dma_rd_u), .pmu_coh_dma_wr(pmu_dma_wr_u)
 );
 
 l2_cache_shared #(
@@ -258,6 +267,7 @@ coh_checker #(
     .clk(clk), .reset_n(reset_n), .active(1'b1),
     .d0_wr_valid(d0_wr_v), .d0_wr_laddr(d0_wr_la), .d0_wr_data(d0_wr_dat),
     .d1_wr_valid(d1_wr_v), .d1_wr_laddr(d1_wr_la), .d1_wr_data(d1_wr_dat),
+    .dma_wr_valid(1'b0), .dma_wr_laddr(16'd0), .dma_wr_data(128'd0),
     .bus_evt_valid(bus_evt_v), .bus_evt_src(bus_evt_src), .bus_evt_op(bus_evt_op),
     .bus_evt_laddr(bus_evt_la), .bus_evt_c2c(bus_evt_c2c), .bus_evt_shared(bus_evt_sh),
     .d0_idle(d0_idle), .d1_idle(d1_idle), .coh_idle(coh_idle),

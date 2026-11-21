@@ -21,6 +21,7 @@ RTL_MEM    := rtl/mem/icache_2w.sv rtl/mem/dcache_nb.sv rtl/mem/mem_arb_2to1.sv 
               rtl/mem/main_memory_nb.sv rtl/mem/l2_bank.sv rtl/mem/l2_cache_shared.sv \
               rtl/mem/main_memory_dram.sv
 RTL_COH    := rtl/coherence/dcache_nb_coh.sv rtl/coherence/coh_interconnect.sv
+RTL_DMA    := rtl/bus/axi4_to_coh_bridge.sv rtl/periph/dma_axi4_coh.sv
 RTL_APB    := rtl/bus/mmio_to_apb4_bridge.sv rtl/bus/apb4_interconnect.sv \
               rtl/periph/apb4_clint.sv rtl/periph/apb4_plic.sv rtl/periph/apb4_gpio.sv \
               rtl/periph/apb4_uart.sv rtl/periph/apb4_timer_pwm.sv rtl/periph/apb4_soc_ctrl.sv
@@ -32,7 +33,7 @@ RTL_CORE   := rtl/core/instr_mem2w.sv rtl/core/regfile2w.sv rtl/core/fregfile2w.
 RTL_SOC    := rtl/soc/ooo2w_soc.sv
 RTL_P1_SOC := rtl/soc/single_ooo2w_p1_soc.sv
 RTL_P2_SOC := $(RTL_APB) rtl/soc/single_ooo2w_soc.sv
-RTL_P4_SOC := $(RTL_APB) rtl/soc/dual_ooo2w_soc.sv
+RTL_P4_SOC := $(RTL_APB) $(RTL_DMA) rtl/soc/dual_ooo2w_soc.sv
 
 V_LINT  := --lint-only -Wall $(INC_FLAGS) -Wno-UNUSEDSIGNAL -Wno-UNUSEDPARAM
 V_BUILD := --binary --assert -Wall $(INC_FLAGS) -Wno-UNUSEDSIGNAL -Wno-UNUSEDPARAM -Wno-DECLFILENAME --timescale 1ns/1ps -j 4
@@ -40,17 +41,17 @@ V_BUILD := --binary --assert -Wall $(INC_FLAGS) -Wno-UNUSEDSIGNAL -Wno-UNUSEDPAR
 CFLAGS_BASE := -march=rv32ima -mabi=ilp32 -O2 -ffreestanding -nostdlib -nostartfiles \
                -Wall -Wextra -Isw/common -T sw/common/link.ld
 
-.PHONY: all lint-phase0 lint-phase1 lint-phase2 lint-phase3 lint-phase4 lint-phase-u2 lint-phase-u3 lint-phase-u4 lint-phase-u5 lint-phase-u6 \
-        synth-phase0 synth-phase1 synth-phase2 synth-phase3 synth-phase4 synth-phase-u2 synth-phase-u3 synth-phase-u4 synth-phase-u5 synth-phase-u6 synth-phase7 \
-        test-phase0-unit test-phase1-unit test-phase2-unit test-phase3-unit formal-phase3 \
+.PHONY: all lint-phase0 lint-phase1 lint-phase2 lint-phase3 lint-phase4 lint-phase-u2 lint-phase-u3 lint-phase-u4 lint-phase-u5 lint-phase-u6 lint-phase-u7 \
+        synth-phase0 synth-phase1 synth-phase2 synth-phase3 synth-phase4 synth-phase-u2 synth-phase-u3 synth-phase-u4 synth-phase-u5 synth-phase-u6 synth-phase-u7 synth-phase7 \
+        test-phase0-unit test-phase1-unit test-phase2-unit test-phase3-unit formal-phase3 formal-phase-u7 \
         test-phase0-asm test-phase0-c-build test-phase0-baseline test-phase1-v2 test-phase2-l2 \
-        test-phase4-litmus test-phase5-fuzz test-phase6-bench test-phase-u1 test-phase-u2 test-phase-u3 test-phase-u4 test-phase-u5 test-phase-u6 clean
+        test-phase4-litmus test-phase5-fuzz test-phase6-bench test-phase-u1 test-phase-u2 test-phase-u3 test-phase-u4 test-phase-u5 test-phase-u6 test-phase-u7 clean
 
-all: lint-phase0 lint-phase1 lint-phase2 lint-phase3 lint-phase4 lint-phase-u2 lint-phase-u3 lint-phase-u4 lint-phase-u5 lint-phase-u6 \
-     synth-phase0 synth-phase1 synth-phase2 synth-phase3 synth-phase4 synth-phase-u2 synth-phase-u3 synth-phase-u4 synth-phase-u5 synth-phase-u6 synth-phase7 \
-     test-phase0-unit test-phase1-unit test-phase2-unit test-phase3-unit formal-phase3 \
+all: lint-phase0 lint-phase1 lint-phase2 lint-phase3 lint-phase4 lint-phase-u2 lint-phase-u3 lint-phase-u4 lint-phase-u5 lint-phase-u6 lint-phase-u7 \
+     synth-phase0 synth-phase1 synth-phase2 synth-phase3 synth-phase4 synth-phase-u2 synth-phase-u3 synth-phase-u4 synth-phase-u5 synth-phase-u6 synth-phase-u7 synth-phase7 \
+     test-phase0-unit test-phase1-unit test-phase2-unit test-phase3-unit formal-phase3 formal-phase-u7 \
      test-phase0-asm test-phase0-c-build test-phase0-baseline test-phase1-v2 test-phase2-l2 \
-     test-phase4-litmus test-phase5-fuzz test-phase6-bench test-phase-u1 test-phase-u2 test-phase-u3 test-phase-u4 test-phase-u5 test-phase-u6
+     test-phase4-litmus test-phase5-fuzz test-phase6-bench test-phase-u1 test-phase-u2 test-phase-u3 test-phase-u4 test-phase-u5 test-phase-u6 test-phase-u7
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -112,6 +113,12 @@ lint-phase-u6:
 	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_LINT) --top-module rob2w rtl/core/rob2w.sv
 	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_LINT) --top-module ooo2w_core $(RTL_COMMON) $(RTL_CORE)
 
+lint-phase-u7:
+	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_LINT) --top-module coh_interconnect rtl/coherence/coh_interconnect.sv
+	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_LINT) --top-module axi4_to_coh_bridge rtl/bus/axi4_to_coh_bridge.sv
+	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_LINT) --top-module dma_axi4_coh rtl/periph/dma_axi4_coh.sv
+	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_LINT) --top-module dual_ooo2w_soc $(RTL_COMMON) $(RTL_MEM) $(RTL_COH) $(RTL_CORE) $(RTL_P4_SOC)
+
 synth-phase0:
 	$(YOSYS) -q -p "read_verilog -sv $(INC_FLAGS) rtl/common/decoder.sv; hierarchy -check -top decoder; proc; opt; check -assert"
 	$(YOSYS) -q -p "read_verilog -sv $(INC_FLAGS) rtl/core/csr_unit.sv; hierarchy -check -top csr_unit; proc; opt; check -assert"
@@ -168,6 +175,13 @@ synth-phase-u6:
 	$(YOSYS) -q -p "read_verilog -sv $(INC_FLAGS) rtl/core/rs_fpu2w.sv; hierarchy -check -top rs_fpu2w -chparam ENTRIES 12 -chparam HAS_RS3 1; proc; opt; check -assert; scc -expect 0"
 	$(YOSYS) -q -p "read_verilog -sv $(INC_FLAGS) $(RTL_COMMON) $(RTL_CORE); hierarchy -check -top ooo2w_core; proc; opt_expr; opt_clean; memory -nomap; flatten; opt_clean; check -assert; scc -expect 0"
 	@echo "PASS [synth-phase-u6]: Yosys check -assert + flattened scc -expect 0 passed on RV32IMAF ooo2w_core & FP units!"
+
+synth-phase-u7:
+	$(YOSYS) -q -p "read_verilog -sv $(INC_FLAGS) rtl/coherence/coh_interconnect.sv; hierarchy -check -top coh_interconnect; proc; opt; check -assert; scc -expect 0"
+	$(YOSYS) -q -p "read_verilog -sv $(INC_FLAGS) rtl/bus/axi4_to_coh_bridge.sv; hierarchy -check -top axi4_to_coh_bridge; proc; opt; check -assert; scc -expect 0"
+	$(YOSYS) -q -p "read_verilog -sv $(INC_FLAGS) rtl/periph/dma_axi4_coh.sv; hierarchy -check -top dma_axi4_coh; proc; opt; check -assert; scc -expect 0"
+	$(YOSYS) -q -p "read_verilog -sv $(INC_FLAGS) $(RTL_COMMON) $(RTL_MEM) $(RTL_COH) $(RTL_CORE) $(RTL_P4_SOC); hierarchy -check -top dual_ooo2w_soc -chparam ICACHE_SETS 8 -chparam DCACHE_SETS 8 -chparam L2_SETS_BANK 8 -chparam DRAM_LINE_BITS 4; proc; opt_expr; opt_clean; memory -nomap; flatten; opt_clean; check -assert; scc -expect 0"
+	@echo "PASS [synth-phase-u7]: Yosys check -assert + flattened scc -expect 0 passed on 3-master coh_interconnect, axi4_to_coh_bridge, dma_axi4_coh & dual_ooo2w_soc!"
 
 synth-phase7: $(BUILD_DIR)
 	$(PYTHON) scripts/synth_audit.py
@@ -226,6 +240,9 @@ test-phase3-unit: $(BUILD_DIR)
 
 formal-phase3: $(BUILD_DIR)
 	PATH=$(EDA_BIN):/usr/bin:/bin $(SBY) -f --yosys $(YOSYS) --abc $(ABC) --prefix $(BUILD_DIR)/formal_coh tb/formal/coh_formal.sby
+
+formal-phase-u7: $(BUILD_DIR)
+	PATH=$(EDA_BIN):/usr/bin:/bin $(SBY) -f --yosys $(YOSYS) --abc $(ABC) --prefix $(BUILD_DIR)/formal_coh_dma tb/formal/coh_formal_dma.sby
 
 # ----------------------------------------------------------------------------
 # Phase 0, Phase 1 & Phase 2 End-to-End Suites
@@ -328,6 +345,18 @@ test-phase-u6: $(BUILD_DIR)
 	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_BUILD) -GCORE_ID=0 -GDRAM_LATENCY=16 -GL2_HIT_LAT=3 -GENABLE_PREFETCH=1 --Mdir $(BUILD_DIR)/v_p2_c0 -o Vp2_c0 --top-module tb_single_ooo2w_soc $(RTL_COMMON) $(RTL_MEM) $(RTL_CORE) $(RTL_P2_SOC) tb/common/ooo_trace_mon2w.sv tb/soc/tb_single_ooo2w_soc.sv
 	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_BUILD) -GDRAM_LATENCY=16 -GL2_HIT_LAT=3 -GENABLE_PREFETCH=1 -GENABLE_MOESI_O=1 -GENABLE_SNOOP_REPLAY=1 --Mdir $(BUILD_DIR)/v_dual_soc -o Vdual_soc --top-module tb_dual_ooo2w_soc $(RTL_COMMON) $(RTL_MEM) $(RTL_COH) $(RTL_CORE) $(RTL_P4_SOC) tb/unit/coh_checker.sv tb/soc/tb_dual_ooo2w_soc.sv
 	$(PYTHON) scripts/test_phase_u6_rv32imaf.py
+
+test-phase-u7: $(BUILD_DIR)
+	# 1. 3-Master MOESI + AMBA AXI4 DMA Unit & 10,000-Op Concurrent Stress (Verilator MOESI + MESI + Icarus)
+	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_BUILD) -GENABLE_MOESI_O=1 -GNUM_RAND_OPS=10000 --Mdir $(BUILD_DIR)/v_tb_dma_moesi -o Vtb_dma_moesi --top-module tb_dma_axi4_coh $(RTL_COH) $(RTL_DMA) rtl/mem/l2_bank.sv rtl/mem/l2_cache_shared.sv rtl/mem/main_memory_dram.sv tb/unit/coh_checker.sv tb/unit/tb_dma_axi4_coh.sv
+	$(BUILD_DIR)/v_tb_dma_moesi/Vtb_dma_moesi
+	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_BUILD) -GENABLE_MOESI_O=0 -GNUM_RAND_OPS=10000 --Mdir $(BUILD_DIR)/v_tb_dma_mesi -o Vtb_dma_mesi --top-module tb_dma_axi4_coh $(RTL_COH) $(RTL_DMA) rtl/mem/l2_bank.sv rtl/mem/l2_cache_shared.sv rtl/mem/main_memory_dram.sv tb/unit/coh_checker.sv tb/unit/tb_dma_axi4_coh.sv
+	$(BUILD_DIR)/v_tb_dma_mesi/Vtb_dma_mesi
+	$(IVERILOG) -g2012 $(INC_FLAGS) -Ptb_dma_axi4_coh.NUM_RAND_OPS=2000 -o $(BUILD_DIR)/tb_dma_axi4_coh.vvp $(RTL_COH) $(RTL_DMA) rtl/mem/l2_bank.sv rtl/mem/l2_cache_shared.sv rtl/mem/main_memory_dram.sv tb/unit/coh_checker.sv tb/unit/tb_dma_axi4_coh.sv
+	$(VVP) $(BUILD_DIR)/tb_dma_axi4_coh.vvp
+	# 2. Live Dual-Core RV32IMAF C Coherent DMA + PLIC IRQ + Hardware Snoop-Replay Proof
+	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_BUILD) -GDRAM_LATENCY=16 -GL2_HIT_LAT=3 -GENABLE_PREFETCH=1 -GENABLE_MOESI_O=1 -GENABLE_SNOOP_REPLAY=1 --Mdir $(BUILD_DIR)/v_dual_soc -o Vdual_soc --top-module tb_dual_ooo2w_soc $(RTL_COMMON) $(RTL_MEM) $(RTL_COH) $(RTL_CORE) $(RTL_P4_SOC) tb/unit/coh_checker.sv tb/soc/tb_dual_ooo2w_soc.sv
+	$(PYTHON) scripts/test_phase_u7_dma.py
 
 clean:
 	rm -rf $(BUILD_DIR)

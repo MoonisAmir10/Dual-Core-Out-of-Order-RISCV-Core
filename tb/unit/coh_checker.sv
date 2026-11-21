@@ -1,15 +1,16 @@
 `timescale 1ns / 1ps
 
 // ============================================================================
-// Always-On MOESI Coherence Protocol Monitor & Golden Shadow Checker (Phase 3)
+// Always-On 3-Master MOESI Coherence Protocol Monitor & Golden Shadow Checker
+// (Phase 3: Dual-Core MOESI -> Phase U7: +3rd I/O-Coherent DMA Master!)
 //
-// Attaches to Dual-Core MOESI L1D + coh_interconnect in Verilator & Icarus:
-//   1. Maintains 128-bit Golden Shadow Memory updated at exact store/AMO
-//      linearization points (dbg_wr_commit_* from D0 & D1)
-//   2. Asserts NO simultaneous same-line writes on D0 & D1 (SWMR write safety)
-//   3. Enforces hard WATCHDOG_CYC (default 256) forward-progress deadlock
-//      watchdogs on D0, D1, and coh_interconnect
-//   4. Tracks full coherence event telemetry (GetS, GetM, Upgrade, C2C, Inval)
+// Attaches to Dual-Core MOESI L1D + Coherent DMA + coh_interconnect:
+//   1. Maintains 128-bit Golden Shadow Memory updated at exact store/AMO/DMA
+//      linearization points (dbg_wr_commit_* from D0, D1, and Coherent DMA)
+//   2. Asserts NO simultaneous same-line writes across {D0, D1, DMA} (3-way SWMR!)
+//   3. Enforces hard WATCHDOG_CYC forward-progress deadlock watchdogs on
+//      D0, D1, and coh_interconnect
+//   4. Tracks full coherence event telemetry (GetS, GetM, Upgrade, C2C, Writes)
 // ============================================================================
 module coh_checker #(
     parameter integer LADDR_W      = 16,
@@ -20,7 +21,7 @@ module coh_checker #(
     input  wire                reset_n,
     input  wire                active,
 
-    // Exact Write Linearization Hooks from D0 & D1
+    // Exact Write Linearization Hooks from D0, D1 & Coherent DMA
     input  wire                d0_wr_valid,
     input  wire [LADDR_W-1:0]  d0_wr_laddr,
     input  wire [127:0]        d0_wr_data,
@@ -29,9 +30,13 @@ module coh_checker #(
     input  wire [LADDR_W-1:0]  d1_wr_laddr,
     input  wire [127:0]        d1_wr_data,
 
+    input  wire                dma_wr_valid,
+    input  wire [LADDR_W-1:0]  dma_wr_laddr,
+    input  wire [127:0]        dma_wr_data,
+
     // Global Channel A Bus Serialization Events
     input  wire                bus_evt_valid,
-    input  wire                bus_evt_src,
+    input  wire [1:0]          bus_evt_src,
     input  wire [1:0]          bus_evt_op,
     input  wire [LADDR_W-1:0]  bus_evt_laddr,
     input  wire                bus_evt_c2c,
@@ -73,21 +78,29 @@ always @(posedge clk or negedge reset_n) begin
         wd_d1          <= 32'd0;
         wd_coh         <= 32'd0;
     end else if (active) begin
-        // 1. SWMR Write-Linearization Exclusivity Check & Shadow Memory Update
+        // 1. 3-Way SWMR Write-Linearization Exclusivity Check & Shadow Memory Update
         if (d0_wr_valid && d1_wr_valid && (d0_wr_laddr == d1_wr_laddr)) begin
             $display("FAIL [coh_checker]: SWMR VIOLATION! Simultaneous writes to laddr=0x%04x on D0 & D1!",
                      d0_wr_laddr);
             chk_errors <= chk_errors + 32'd1;
         end
-        if (d0_wr_valid) begin
-            shadow_mem[d0_wr_laddr[13:0]] <= d0_wr_data;
-            cnt_wr_commits <= cnt_wr_commits + 32'd1 + (d1_wr_valid ? 32'd1 : 32'd0);
-        end else if (d1_wr_valid) begin
-            cnt_wr_commits <= cnt_wr_commits + 32'd1;
+        if (d0_wr_valid && dma_wr_valid && (d0_wr_laddr == dma_wr_laddr)) begin
+            $display("FAIL [coh_checker]: SWMR VIOLATION! Simultaneous writes to laddr=0x%04x on D0 & DMA!",
+                     d0_wr_laddr);
+            chk_errors <= chk_errors + 32'd1;
         end
-        if (d1_wr_valid) begin
-            shadow_mem[d1_wr_laddr[13:0]] <= d1_wr_data;
+        if (d1_wr_valid && dma_wr_valid && (d1_wr_laddr == dma_wr_laddr)) begin
+            $display("FAIL [coh_checker]: SWMR VIOLATION! Simultaneous writes to laddr=0x%04x on D1 & DMA!",
+                     d1_wr_laddr);
+            chk_errors <= chk_errors + 32'd1;
         end
+
+        if (d0_wr_valid)  shadow_mem[d0_wr_laddr[13:0]]  <= d0_wr_data;
+        if (d1_wr_valid)  shadow_mem[d1_wr_laddr[13:0]]  <= d1_wr_data;
+        if (dma_wr_valid) shadow_mem[dma_wr_laddr[13:0]] <= dma_wr_data;
+
+        cnt_wr_commits <= cnt_wr_commits + {31'd0, d0_wr_valid} +
+                          {31'd0, d1_wr_valid} + {31'd0, dma_wr_valid};
 
         // 2. Global Channel A Bus Telemetry
         if (bus_evt_valid) begin
@@ -120,7 +133,7 @@ always @(posedge clk or negedge reset_n) begin
         end else
             wd_d1 <= wd_d1 + 32'd1;
 
-        if (coh_idle || bus_evt_valid || d0_progress || d1_progress)
+        if (coh_idle || bus_evt_valid || d0_progress || d1_progress || dma_wr_valid)
             wd_coh <= 32'd0;
         else if (wd_coh >= WATCHDOG_CYC) begin
             $display("FAIL [coh_checker]: DEADLOCK WATCHDOG on coh_interconnect (>%0d cycles!)", WATCHDOG_CYC);

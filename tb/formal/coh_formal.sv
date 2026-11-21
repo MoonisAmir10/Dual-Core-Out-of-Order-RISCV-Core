@@ -157,10 +157,14 @@ wire d0_idle_u, d0_wi_u, d0_am_u, d0_h_u, d0_m_u, d0_w_u, d0_hu_u, d0_mu_u, d0_c
 wire d1_idle_u, d1_wi_u, d1_am_u, d1_h_u, d1_m_u, d1_w_u, d1_hu_u, d1_mu_u, d1_co_u, d1_e2m, d1_upg_u;
 wire i0_rdy_u, i0_rv_u, i1_rdy_u, i1_rv_u;
 wire [127:0] i0_rd_u, i1_rd_u;
-wire be_v, be_s, be_c2c, be_sh, coh_idle_u;
-wire [1:0] be_op;
+wire be_v, be_c2c, be_sh, coh_idle_u;
+wire [1:0] be_s, be_op;
 wire [LADDR_W-1:0] be_la;
-wire pg_u, pm_u, pu_u, pc_u, pi_u, pw_u;
+wire pg_u, pm_u, pu_u, pc_u, pi_u, pw_u, pdr_u, pdw_u;
+wire dma_rdy_u, dma_rv_u, dma_wv_u, fp_dmav_u, fp_dmarmw_u, fdma_wbv_u;
+wire [LADDR_W-1:0] dma_wla_u, fp_dmala_u, fdma_wbla_u;
+wire [127:0] dma_rd_u, dma_wdat_u;
+wire [7:0] fdma_wbb0_u;
 
 dcache_nb_coh #(
     .AWIDTH(AWIDTH), .NUM_SETS(NUM_SETS), .TAG_W(TAG_W), .ID_W(ID_W), .ENABLE_MOESI_O(1)
@@ -248,6 +252,10 @@ coh_interconnect #(
     .d1_wb_valid(d1_wb_v), .d1_wb_ready(d1_wb_rdy), .d1_wb_laddr(d1_wb_la), .d1_wb_data(d1_wb_dat),
     .d1_coh_resp_valid(d1_resp_v), .d1_coh_resp_id(d1_resp_id), .d1_coh_resp_data(d1_resp_dat),
     .d1_coh_resp_shared(d1_resp_sh), .d1_coh_resp_from_c2c(d1_resp_c2c), .d1_coh_resp_upgrade_ack(d1_resp_upg),
+    .dma_coh_req_valid(1'b0), .dma_coh_req_ready(dma_rdy_u), .dma_coh_req_is_write(1'b0),
+    .dma_coh_req_laddr(3'd0), .dma_coh_req_wdata(128'd0), .dma_coh_req_wstrb(16'd0),
+    .dma_coh_resp_valid(dma_rv_u), .dma_coh_resp_rdata(dma_rd_u),
+    .dma_wr_commit_valid(dma_wv_u), .dma_wr_commit_laddr(dma_wla_u), .dma_wr_commit_data(dma_wdat_u),
     .i0_rd_valid(1'b0), .i0_rd_ready(i0_rdy_u), .i0_rd_laddr(3'd0), .i0_rresp_valid(i0_rv_u), .i0_rresp_data(i0_rd_u),
     .i1_rd_valid(1'b0), .i1_rd_ready(i1_rdy_u), .i1_rd_laddr(3'd0), .i1_rresp_valid(i1_rv_u), .i1_rresp_data(i1_rd_u),
     .l2_m0_req_valid(l2_m0_v), .l2_m0_req_ready(l2_m0_rdy), .l2_m0_req_is_write(l2_m0_we),
@@ -261,10 +269,13 @@ coh_interconnect #(
     .coh_idle(coh_idle_u),
     .pmu_coh_gets(pg_u), .pmu_coh_getm(pm_u), .pmu_coh_upgrade(pu_u),
     .pmu_coh_c2c_dirty(pc_u), .pmu_coh_inval(pi_u), .pmu_coh_mesi_wb(pw_u),
+    .pmu_coh_dma_rd(pdr_u), .pmu_coh_dma_wr(pdw_u),
     .f_c2c0_v(f_c2c0_v), .f_c2c0_from_c2c(f_c2c0_fc), .f_c2c0_shared(f_c2c0_sh),
     .f_c2c0_laddr(f_c2c0_la), .f_c2c0_b0(f_c2c0_b0),
     .f_c2c1_v(f_c2c1_v), .f_c2c1_from_c2c(f_c2c1_fc), .f_c2c1_shared(f_c2c1_sh),
-    .f_c2c1_laddr(f_c2c1_la), .f_c2c1_b0(f_c2c1_b0)
+    .f_c2c1_laddr(f_c2c1_la), .f_c2c1_b0(f_c2c1_b0),
+    .f_p_dma_v(fp_dmav_u), .f_p_dma_rmw(fp_dmarmw_u), .f_p_dma_laddr(fp_dmala_u),
+    .f_dma_wb_v(fdma_wbv_u), .f_dma_wb_laddr(fdma_wbla_u), .f_dma_wb_b0(fdma_wbb0_u)
 );
 
 // ----------------------------------------------------------------------------

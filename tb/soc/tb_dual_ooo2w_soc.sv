@@ -45,13 +45,13 @@ wire [31:0] c1_c1_seq, c1_c1_pc, c1_c1_ins, c1_c1_rdw, c1_c1_ma, c1_c1_md;
 wire        c1_c1_rwe, c1_c1_rfp, c1_c1_mv, c1_c1_mw;
 wire [4:0]  c1_c1_rda, c1_c1_ff; wire [3:0] c1_c1_ms;
 
-wire        bus_evt_v, bus_evt_src, bus_evt_c2c, bus_evt_sh;
-wire [1:0]  bus_evt_op;
+wire        bus_evt_v, bus_evt_c2c, bus_evt_sh;
+wire [1:0]  bus_evt_src, bus_evt_op;
 wire [15:0] bus_evt_la;
 
-wire        d0_wr_v, d1_wr_v, d0_idle, d1_idle, coh_idle, l2_idle;
-wire [15:0] d0_wr_la, d1_wr_la;
-wire [127:0] d0_wr_dat, d1_wr_dat;
+wire        d0_wr_v, d1_wr_v, dma_wr_v, d0_idle, d1_idle, coh_idle, l2_idle;
+wire [15:0] d0_wr_la, d1_wr_la, dma_wr_la;
+wire [127:0] d0_wr_dat, d1_wr_dat, dma_wr_dat;
 
 wire        c0_halted, c1_halted, all_halted, clint_msip0, clint_msip1;
 wire [31:0] c0_x14, c1_x14;
@@ -65,6 +65,7 @@ wire [31:0] pmu_c0_ic_h, pmu_c0_ic_m, pmu_c1_ic_h, pmu_c1_ic_m;
 wire [31:0] pmu_c0_dc_h, pmu_c0_dc_m, pmu_c1_dc_h, pmu_c1_dc_m;
 wire [31:0] pmu_c0_replay, pmu_c1_replay, pmu_c0_amo, pmu_c1_amo;
 wire [31:0] pmu_gets, pmu_getm, pmu_upg, pmu_c2c, pmu_inval, pmu_mesi_wb, pmu_e2m;
+wire [31:0] pmu_dma_rds, pmu_dma_wrs;
 wire [31:0] pmu_l2_h, pmu_l2_m, pmu_l2_wb, pmu_l2_bc, pmu_dram_r, pmu_dram_w;
 
 dual_ooo2w_soc #(
@@ -98,6 +99,7 @@ dual_ooo2w_soc #(
     .bus_evt_laddr(bus_evt_la), .bus_evt_c2c(bus_evt_c2c), .bus_evt_shared(bus_evt_sh),
     .d0_wr_commit_valid(d0_wr_v), .d0_wr_commit_laddr(d0_wr_la), .d0_wr_commit_data(d0_wr_dat),
     .d1_wr_commit_valid(d1_wr_v), .d1_wr_commit_laddr(d1_wr_la), .d1_wr_commit_data(d1_wr_dat),
+    .dma_wr_commit_valid(dma_wr_v), .dma_wr_commit_laddr(dma_wr_la), .dma_wr_commit_data(dma_wr_dat),
     .d0_idle(d0_idle), .d1_idle(d1_idle), .coh_idle(coh_idle), .l2_idle(l2_idle),
     .c0_halted(c0_halted), .c1_halted(c1_halted), .all_halted(all_halted),
     .c0_x14(c0_x14), .c1_x14(c1_x14),
@@ -116,7 +118,7 @@ dual_ooo2w_soc #(
     .pmu_c0_amo(pmu_c0_amo), .pmu_c1_amo(pmu_c1_amo),
     .pmu_coh_gets(pmu_gets), .pmu_coh_getm(pmu_getm), .pmu_coh_upgrade(pmu_upg),
     .pmu_coh_c2c_dirty(pmu_c2c), .pmu_coh_inval(pmu_inval), .pmu_coh_mesi_wb(pmu_mesi_wb),
-    .pmu_coh_e2m(pmu_e2m),
+    .pmu_coh_e2m(pmu_e2m), .pmu_coh_dma_rds(pmu_dma_rds), .pmu_coh_dma_wrs(pmu_dma_wrs),
     .pmu_l2_hits(pmu_l2_h), .pmu_l2_misses(pmu_l2_m), .pmu_l2_wbs(pmu_l2_wb),
     .pmu_l2_bank_conflicts(pmu_l2_bc), .pmu_dram_rds(pmu_dram_r), .pmu_dram_wrs(pmu_dram_w)
 );
@@ -129,6 +131,7 @@ coh_checker #(
     .clk(clk), .reset_n(reset_n), .active(!all_halted),
     .d0_wr_valid(d0_wr_v), .d0_wr_laddr(d0_wr_la), .d0_wr_data(d0_wr_dat),
     .d1_wr_valid(d1_wr_v), .d1_wr_laddr(d1_wr_la), .d1_wr_data(d1_wr_dat),
+    .dma_wr_valid(dma_wr_v), .dma_wr_laddr(dma_wr_la), .dma_wr_data(dma_wr_dat),
     .bus_evt_valid(bus_evt_v), .bus_evt_src(bus_evt_src), .bus_evt_op(bus_evt_op),
     .bus_evt_laddr(bus_evt_la), .bus_evt_c2c(bus_evt_c2c), .bus_evt_shared(bus_evt_sh),
     .d0_idle(d0_idle), .d1_idle(d1_idle), .coh_idle(coh_idle),
@@ -215,6 +218,7 @@ always @(posedge clk) begin
         if (bus_evt_v && swmr_errs < 10) check_swmr_line(bus_evt_la);
         if (d0_wr_v && swmr_errs < 10)   check_swmr_line(d0_wr_la);
         if (d1_wr_v && swmr_errs < 10)   check_swmr_line(d1_wr_la);
+        if (dma_wr_v && swmr_errs < 10)  check_swmr_line(dma_wr_la);
 
         // Single-core hang watchdogs (4096 cycles without commit while unhalted!)
         if (c0_halted || c0_c0_v || c0_c1_v) c0_hang_wd = 0;
@@ -403,12 +407,13 @@ initial begin
         $fatal(1);
     end
 
-    $display("PASS [dual_ooo2w_soc]: file=%0s cycles=%0d c0_ret=%0d c1_ret=%0d chip_IPC=%0.3f c0_x14=0x%08x c1_x14=0x%08x replay=%0d/%0d amo=%0d/%0d ic_m=%0d/%0d dc_m=%0d/%0d coh_gets=%0d coh_getm=%0d coh_upg=%0d c2c=%0d e2m=%0d mesi_wb=%0d l2_h=%0d l2_m=%0d l2_wb=%0d l2_bc=%0d dram_r=%0d dram_w=%0d",
+    $display("PASS [dual_ooo2w_soc]: file=%0s cycles=%0d c0_ret=%0d c1_ret=%0d chip_IPC=%0.3f c0_x14=0x%08x c1_x14=0x%08x replay=%0d/%0d amo=%0d/%0d ic_m=%0d/%0d dc_m=%0d/%0d coh_gets=%0d coh_getm=%0d coh_upg=%0d c2c=%0d e2m=%0d mesi_wb=%0d dma_r=%0d dma_w=%0d l2_h=%0d l2_m=%0d l2_wb=%0d l2_bc=%0d dram_r=%0d dram_w=%0d",
              hex_file, pmu_cycles, pmu_c0_instret, pmu_c1_instret,
              (pmu_cycles > 0) ? (1.0 * (pmu_c0_instret + pmu_c1_instret) / pmu_cycles) : 0.0,
              c0_x14, c1_x14, pmu_c0_replay, pmu_c1_replay, pmu_c0_amo, pmu_c1_amo,
              pmu_c0_ic_m, pmu_c1_ic_m, pmu_c0_dc_m, pmu_c1_dc_m,
              pmu_gets, pmu_getm, pmu_upg, pmu_c2c, pmu_e2m, pmu_mesi_wb,
+             pmu_dma_rds, pmu_dma_wrs,
              pmu_l2_h, pmu_l2_m, pmu_l2_wb, pmu_l2_bc, pmu_dram_r, pmu_dram_w);
     $finish;
 end

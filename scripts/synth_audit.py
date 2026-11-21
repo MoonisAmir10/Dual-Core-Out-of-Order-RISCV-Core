@@ -53,6 +53,9 @@ RTL_MEM = [
 RTL_COH = [
     "rtl/coherence/dcache_nb_coh.sv", "rtl/coherence/coh_interconnect.sv",
 ]
+RTL_DMA = [
+    "rtl/bus/axi4_to_coh_bridge.sv", "rtl/periph/dma_axi4_coh.sv",
+]
 RTL_FPU = [
     "rtl/fpu/fpu_fma_pipe.sv", "rtl/fpu/fpu_div_sqrt.sv", "rtl/fpu/fpu_misc.sv",
 ]
@@ -109,13 +112,15 @@ SYNTH_UNITS: List[Tuple[str, str, List[str], str, int, int, str, str]] = [
     ("apb4_uart",        "apb4_uart",           ["rtl/periph/apb4_uart.sv"],        "", 1, 1, "uncore", "AMBA APB4 16-FIFO 8N1 Full-Duplex UART + Loopback/Tap"),
     ("apb4_timer_pwm",   "apb4_timer_pwm",      ["rtl/periph/apb4_timer_pwm.sv"],   "", 1, 1, "uncore", "AMBA APB4 2-Channel 32-Bit Timer & PWM Generator"),
     ("apb4_soc_ctrl",    "apb4_soc_ctrl",       ["rtl/periph/apb4_soc_ctrl.sv"],    "", 1, 1, "uncore", "AMBA APB4 SoC Ctrl, TOHOST/HALT & Live PMU"),
+    ("axi4_coh_bridge",  "axi4_to_coh_bridge",  ["rtl/bus/axi4_to_coh_bridge.sv"],  "", 0, 1, "uncore", "AMBA AXI4 128-Bit Slave -> 3rd Coherent Master Bridge"),
+    ("dma_axi4_coh",     "dma_axi4_coh",        ["rtl/periph/dma_axi4_coh.sv"],     "", 0, 1, "uncore", "2-Ch AMBA APB4 + AXI4 128-Bit Burst I/O-Coherent DMA"),
 ]
 
 FULL_SOC_LOOP_AUDITS: List[Tuple[str, str, List[str], str]] = [
     ("ooo2w_core",       "ooo2w_core",       RTL_COMMON + RTL_CORE, ""),
     ("single_ooo2w_soc", "single_ooo2w_soc", RTL_COMMON + RTL_MEM + RTL_CORE + RTL_APB + ["rtl/soc/single_ooo2w_soc.sv"],
      "-chparam ICACHE_SETS 8 -chparam DCACHE_SETS 8 -chparam L2_SETS_BANK 8 -chparam DRAM_LINE_BITS 4"),
-    ("dual_ooo2w_soc",   "dual_ooo2w_soc",   RTL_COMMON + RTL_MEM + RTL_COH + RTL_CORE + RTL_APB + ["rtl/soc/dual_ooo2w_soc.sv"],
+    ("dual_ooo2w_soc",   "dual_ooo2w_soc",   RTL_COMMON + RTL_MEM + RTL_COH + RTL_DMA + RTL_CORE + RTL_APB + ["rtl/soc/dual_ooo2w_soc.sv"],
      "-chparam ICACHE_SETS 8 -chparam DCACHE_SETS 8 -chparam L2_SETS_BANK 8 -chparam DRAM_LINE_BITS 4"),
 ]
 
