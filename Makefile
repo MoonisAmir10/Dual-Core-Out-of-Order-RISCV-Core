@@ -39,13 +39,13 @@ CFLAGS_BASE := -march=rv32ima -mabi=ilp32 -O2 -ffreestanding -nostdlib -nostartf
         synth-phase0 synth-phase1 synth-phase2 synth-phase3 synth-phase4 synth-phase7 \
         test-phase0-unit test-phase1-unit test-phase2-unit test-phase3-unit formal-phase3 \
         test-phase0-asm test-phase0-c-build test-phase0-baseline test-phase1-v2 test-phase2-l2 \
-        test-phase4-litmus test-phase5-fuzz test-phase6-bench clean
+        test-phase4-litmus test-phase5-fuzz test-phase6-bench test-phase-u1 clean
 
 all: lint-phase0 lint-phase1 lint-phase2 lint-phase3 lint-phase4 \
      synth-phase0 synth-phase1 synth-phase2 synth-phase3 synth-phase4 synth-phase7 \
      test-phase0-unit test-phase1-unit test-phase2-unit test-phase3-unit formal-phase3 \
      test-phase0-asm test-phase0-c-build test-phase0-baseline test-phase1-v2 test-phase2-l2 \
-     test-phase4-litmus test-phase5-fuzz test-phase6-bench
+     test-phase4-litmus test-phase5-fuzz test-phase6-bench test-phase-u1
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -221,6 +221,15 @@ test-phase6-bench: $(BUILD_DIR)
 	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_BUILD) -GDRAM_LATENCY=16 -GL2_HIT_LAT=3 -GENABLE_PREFETCH=1 -GENABLE_MOESI_O=0 -GENABLE_SNOOP_REPLAY=1 --Mdir $(BUILD_DIR)/v_dual_soc_mesi -o Vdual_soc_mesi --top-module tb_dual_ooo2w_soc $(RTL_COMMON) $(RTL_MEM) $(RTL_COH) $(RTL_CORE) $(RTL_P4_SOC) tb/unit/coh_checker.sv tb/soc/tb_dual_ooo2w_soc.sv
 	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_BUILD) -GDRAM_LATENCY=16 -GL2_HIT_LAT=3 -GENABLE_PREFETCH=0 -GENABLE_MOESI_O=1 -GENABLE_SNOOP_REPLAY=1 --Mdir $(BUILD_DIR)/v_dual_soc_nopf -o Vdual_soc_nopf --top-module tb_dual_ooo2w_soc $(RTL_COMMON) $(RTL_MEM) $(RTL_COH) $(RTL_CORE) $(RTL_P4_SOC) tb/unit/coh_checker.sv tb/soc/tb_dual_ooo2w_soc.sv
 	$(PYTHON) scripts/run_dual_benchmarks.py
+
+test-phase-u1: $(BUILD_DIR)
+	$(IVERILOG) -g2012 $(INC_FLAGS) -o $(BUILD_DIR)/tb_csr_traps.vvp rtl/core/csr_unit.sv tb/unit/tb_csr_traps.sv
+	$(VVP) $(BUILD_DIR)/tb_csr_traps.vvp
+	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_BUILD) --Mdir $(BUILD_DIR)/v_tb_csr_traps -o Vtb_csr_traps --top-module tb_csr_traps rtl/core/csr_unit.sv tb/unit/tb_csr_traps.sv
+	$(BUILD_DIR)/v_tb_csr_traps/Vtb_csr_traps
+	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_BUILD) -GCORE_ID=0 -GDRAM_LATENCY=16 -GL2_HIT_LAT=3 -GENABLE_PREFETCH=1 --Mdir $(BUILD_DIR)/v_p2_c0 -o Vp2_c0 --top-module tb_single_ooo2w_soc $(RTL_COMMON) $(RTL_MEM) $(RTL_CORE) $(RTL_P2_SOC) tb/common/ooo_trace_mon2w.sv tb/soc/tb_single_ooo2w_soc.sv
+	PATH=$(EDA_BIN):/usr/bin:/bin $(VERILATOR) $(V_BUILD) -GDRAM_LATENCY=16 -GL2_HIT_LAT=3 -GENABLE_PREFETCH=1 -GENABLE_MOESI_O=1 -GENABLE_SNOOP_REPLAY=1 --Mdir $(BUILD_DIR)/v_dual_soc -o Vdual_soc --top-module tb_dual_ooo2w_soc $(RTL_COMMON) $(RTL_MEM) $(RTL_COH) $(RTL_CORE) $(RTL_P4_SOC) tb/unit/coh_checker.sv tb/soc/tb_dual_ooo2w_soc.sv
+	$(PYTHON) scripts/test_phase_u1_traps.py
 
 clean:
 	rm -rf $(BUILD_DIR)

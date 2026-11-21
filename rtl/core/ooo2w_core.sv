@@ -46,10 +46,12 @@ module ooo2w_core #(
     input  wire                dc_hit_valid,
     input  wire [ID_W-1:0]     dc_hit_id,
     input  wire [31:0]         dc_hit_rdata,
+    input  wire                dc_hit_err,
 
     input  wire                dc_fill_valid,
     input  wire [ID_W-1:0]     dc_fill_id,
     input  wire [31:0]         dc_fill_rdata,
+    input  wire                dc_fill_err,
 
     output wire                dc_flush,
     output wire                dc_squash_valid,
@@ -63,6 +65,11 @@ module ooo2w_core #(
     // External Coherence Snoop-Invalidation Port (triggers LQ Memory-Order Replay!)
     input  wire                coh_snoop_inv_valid,
     input  wire [AWIDTH-5:0]   coh_snoop_inv_line,
+
+    // External M-Mode Hardware Interrupt Lines (CLINT + PLIC)
+    input  wire                irq_msip,
+    input  wire                irq_mtip,
+    input  wire                irq_meip,
 
     // 2-Wide RVFI Commit Trace Ports (strict in-order: commit0 older, commit1 younger)
     output wire                commit0_valid,
@@ -129,7 +136,8 @@ module ooo2w_core #(
     output wire [1:0]          stat_ras_mispred_cnt,
     output wire                stat_replay_flush,
     output wire                stat_amo_commit,
-    output wire                stat_fence_commit
+    output wire                stat_fence_commit,
+    output wire                stat_trap_taken
 );
 
 `include "rv32ima_defs.vh"
@@ -170,6 +178,9 @@ wire [31:0] cdb0_br_target;
 wire        cdb0_is_mem, cdb0_mem_we;
 wire [31:0] cdb0_mem_addr, cdb0_mem_wdata;
 wire [3:0]  cdb0_mem_wstrb;
+wire        cdb0_exc_valid;
+wire [3:0]  cdb0_exc_cause;
+wire [31:0] cdb0_exc_tval;
 
 reg         alu0_out_v, alu1_out_v;
 reg  [4:0]  alu0_out_tag, alu1_out_tag;
@@ -245,7 +256,7 @@ btb_bht2w #(
     .commit1_instr(commit1_instr),
     .commit1_br_taken(rob_c1_br_taken),
     .full_flush(rob_full_flush),
-    .upd_valid(cdb0_valid && cdb0_is_br && !rob_full_flush),
+    .upd_valid(cdb0_valid && cdb0_is_br && !cdb0_exc_valid && !rob_full_flush),
     .upd_pc(rob_cdb0_br_pc),
     .upd_is_cond(rob_cdb0_br_is_cond),
     .upd_is_jalr(rob_cdb0_br_is_jalr),
@@ -322,7 +333,7 @@ wire [3:0]  d0_alu_sel;
 wire        d0_asel, d0_bsel;
 wire [1:0]  d0_mul_op, d0_div_op, d0_mem_sz;
 wire [2:0]  d0_br_f3;
-wire        d0_is_br, d0_is_jal, d0_is_jalr, d0_mem_rd, d0_mem_wr, d0_mem_uns, d0_ebrk, d0_ill;
+wire        d0_is_br, d0_is_jal, d0_is_jalr, d0_mem_rd, d0_mem_wr, d0_mem_uns, d0_ebrk, d0_ecall, d0_mret, d0_ill;
 wire        d0_is_fence, d0_is_fence_i, d0_is_csr, d0_csr_uimm;
 wire [2:0]  d0_csr_op;
 wire [11:0] d0_csr_addr;
@@ -337,7 +348,7 @@ decoder u_dec0 (
     .asel(d0_asel), .bsel(d0_bsel), .mul_op(d0_mul_op), .div_op(d0_div_op),
     .br_funct3(d0_br_f3), .is_branch(d0_is_br), .is_jal(d0_is_jal), .is_jalr(d0_is_jalr),
     .mem_read(d0_mem_rd), .mem_write(d0_mem_wr), .mem_size(d0_mem_sz), .mem_unsigned(d0_mem_uns),
-    .is_ebreak(d0_ebrk),
+    .is_ebreak(d0_ebrk), .is_ecall(d0_ecall), .is_mret(d0_mret),
     .is_fence(d0_is_fence), .is_fence_i(d0_is_fence_i),
     .is_csr(d0_is_csr), .csr_op(d0_csr_op), .csr_addr(d0_csr_addr), .csr_use_imm(d0_csr_uimm),
     .is_amo(d0_is_amo), .is_lr(d0_is_lr), .is_sc(d0_is_sc), .amo_op(d0_amo_op),
@@ -354,7 +365,7 @@ wire [3:0]  d1_alu_sel;
 wire        d1_asel, d1_bsel;
 wire [1:0]  d1_mul_op, d1_div_op, d1_mem_sz;
 wire [2:0]  d1_br_f3;
-wire        d1_is_br, d1_is_jal, d1_is_jalr, d1_mem_rd, d1_mem_wr, d1_mem_uns, d1_ebrk, d1_ill;
+wire        d1_is_br, d1_is_jal, d1_is_jalr, d1_mem_rd, d1_mem_wr, d1_mem_uns, d1_ebrk, d1_ecall, d1_mret, d1_ill;
 wire        d1_is_fence, d1_is_fence_i, d1_is_csr, d1_csr_uimm;
 wire [2:0]  d1_csr_op;
 wire [11:0] d1_csr_addr;
@@ -369,7 +380,7 @@ decoder u_dec1 (
     .asel(d1_asel), .bsel(d1_bsel), .mul_op(d1_mul_op), .div_op(d1_div_op),
     .br_funct3(d1_br_f3), .is_branch(d1_is_br), .is_jal(d1_is_jal), .is_jalr(d1_is_jalr),
     .mem_read(d1_mem_rd), .mem_write(d1_mem_wr), .mem_size(d1_mem_sz), .mem_unsigned(d1_mem_uns),
-    .is_ebreak(d1_ebrk),
+    .is_ebreak(d1_ebrk), .is_ecall(d1_ecall), .is_mret(d1_mret),
     .is_fence(d1_is_fence), .is_fence_i(d1_is_fence_i),
     .is_csr(d1_is_csr), .csr_op(d1_csr_op), .csr_addr(d1_csr_addr), .csr_use_imm(d1_csr_uimm),
     .is_amo(d1_is_amo), .is_lr(d1_is_lr), .is_sc(d1_is_sc), .amo_op(d1_amo_op),
@@ -403,7 +414,7 @@ wire        lsq_head0_replay, lsq_head1_replay;
 // Decode ROB-head instruction for non-speculative CSR & RV32A AMO execution
 wire [4:0]  hd_rs1, hd_rs2, hd_rd_u;
 wire        hd_u0, hd_u1, hd_u2, hd_u3, hd_u4, hd_u5, hd_u6, hd_u7, hd_u8, hd_u9;
-wire        hd_u10, hd_u11, hd_u12, hd_u13, hd_u14, hd_u15, hd_u16, hd_u17, hd_u18, hd_u19, hd_u20, hd_u21;
+wire        hd_u10, hd_u11, hd_u12, hd_u13, hd_u14, hd_u15, hd_u16, hd_u17, hd_u18, hd_u19, hd_u20, hd_u21, hd_u22, hd_u23;
 wire [2:0]  hd_imm_u, hd_fu_u, hd_br_u, hd_csr_op;
 wire [3:0]  hd_alu_u, hd_amo_op;
 wire [1:0]  hd_mul_u, hd_div_u, hd_msz_u;
@@ -416,7 +427,7 @@ decoder u_dec_head (
     .asel(hd_u3), .bsel(hd_u4), .mul_op(hd_mul_u), .div_op(hd_div_u),
     .br_funct3(hd_br_u), .is_branch(hd_u5), .is_jal(hd_u6), .is_jalr(hd_u7),
     .mem_read(hd_u8), .mem_write(hd_u9), .mem_size(hd_msz_u), .mem_unsigned(hd_u10),
-    .is_ebreak(hd_u11),
+    .is_ebreak(hd_u11), .is_ecall(hd_u22), .is_mret(hd_u23),
     .is_fence(hd_u12), .is_fence_i(hd_u13),
     .is_csr(hd_u14), .csr_op(hd_csr_op), .csr_addr(hd_csr_addr), .csr_use_imm(hd_u15),
     .is_amo(hd_u16), .is_lr(hd_u17), .is_sc(hd_u18), .amo_op(hd_amo_op),
@@ -437,12 +448,19 @@ regfile2w u_arf (
     .x14(x14)
 );
 
-// Non-speculative Zicsr Unit (executed cleanly at ROB head via CDB0 Port 1)
+// Non-speculative M-Mode Zicsr & Trap Control Unit (executed cleanly at ROB head)
 wire        cdb_p1_grant;
-wire        csr_exec_req = rob_head_valid && !rob_head_ready && rob_head_is_csr && !rob_full_flush;
+wire        csr_exec_req  = rob_head_valid && !rob_head_ready && rob_head_is_csr && !rob_full_flush;
 wire        csr_exec_fire = csr_exec_req && cdb_p1_grant;
 wire [31:0] csr_rdata;
-wire        csr_illegal_u;
+wire        csr_access_illegal, csr_illegal_u;
+wire [31:0] csr_mtvec_val, csr_mepc_val;
+wire        csr_irq_pending;
+wire [3:0]  csr_irq_cause;
+wire [1:0]  csr_mstatus_fs_u;
+wire        rob_trap_enter, rob_trap_is_irq, rob_mret_exec;
+wire [3:0]  rob_trap_cause;
+wire [31:0] rob_trap_pc, rob_trap_tval;
 wire [63:0] mcycle_u, minstret_u;
 wire [1:0]  retire_cnt = {1'b0, rob_c0_valid} + {1'b0, rob_c1_valid};
 
@@ -455,7 +473,22 @@ csr_unit #(.CORE_ID(CORE_ID)) u_csr (
     .csr_rs1_uimm(hd_rs1),
     .csr_rs1_val(arf_head_rs1),
     .csr_rdata(csr_rdata),
+    .csr_access_illegal(csr_access_illegal),
     .csr_illegal(csr_illegal_u),
+    .irq_msip(irq_msip),
+    .irq_mtip(irq_mtip),
+    .irq_meip(irq_meip),
+    .trap_enter(rob_trap_enter),
+    .trap_is_irq(rob_trap_is_irq),
+    .trap_cause(rob_trap_cause),
+    .trap_pc(rob_trap_pc),
+    .trap_tval(rob_trap_tval),
+    .mret_exec(rob_mret_exec),
+    .mtvec_out(csr_mtvec_val),
+    .mepc_out(csr_mepc_val),
+    .irq_pending(csr_irq_pending),
+    .irq_cause(csr_irq_cause),
+    .mstatus_fs_out(csr_mstatus_fs_u),
     .mcycle_out(mcycle_u),
     .minstret_out(minstret_u)
 );
@@ -528,8 +561,8 @@ end
 wire        rob_rd0_rdy, rob_rd1_rdy, rob_rd2_rdy, rob_rd3_rdy;
 wire [31:0] rob_rd0_val, rob_rd1_val, rob_rd2_val, rob_rd3_val;
 
-wire d0_ready_init = d0_ebrk || d0_is_fence || d0_is_fence_i;
-wire d1_ready_init = d1_ebrk || d1_is_fence || d1_is_fence_i;
+wire d0_ready_init = d0_ebrk || d0_ecall || d0_mret || d0_ill || d0_is_fence || d0_is_fence_i;
+wire d1_ready_init = d1_ebrk || d1_ecall || d1_mret || d1_ill || d1_is_fence || d1_is_fence_i;
 
 rob2w #(.DEPTH(ROB2W_DEPTH), .TAG_W(TAG_W)) u_rob (
     .clk(clk), .reset_n(reset_n),
@@ -541,14 +574,16 @@ rob2w #(.DEPTH(ROB2W_DEPTH), .TAG_W(TAG_W)) u_rob (
     .disp0_pred_taken(fq0_ptaken), .disp0_pred_target(fq0_ptgt),
     .disp0_pred_ghr(fq0_pghr), .disp0_pred_used_ras(fq0_puras),
     .disp0_pred_bim(fq0_pbim), .disp0_pred_gsh(fq0_pgsh),
-    .disp0_is_ebreak(d0_ebrk), .disp0_is_fence(d0_is_fence), .disp0_is_fence_i(d0_is_fence_i),
+    .disp0_is_ebreak(d0_ebrk), .disp0_is_ecall(d0_ecall), .disp0_is_mret(d0_mret), .disp0_illegal(d0_ill),
+    .disp0_is_fence(d0_is_fence), .disp0_is_fence_i(d0_is_fence_i),
     .disp0_is_csr(d0_is_csr), .disp0_is_amo(d0_is_amo), .disp0_ready_init(d0_ready_init),
     .disp1_seq_id(seq1_id), .disp1_pc(fq1_pc), .disp1_instr(fq1_instr),
     .disp1_fu_type(d1_fu), .disp1_rd_we(d1_rd_we), .disp1_rd_addr(d1_rd),
     .disp1_pred_taken(fq1_ptaken), .disp1_pred_target(fq1_ptgt),
     .disp1_pred_ghr(fq1_pghr), .disp1_pred_used_ras(fq1_puras),
     .disp1_pred_bim(fq1_pbim), .disp1_pred_gsh(fq1_pgsh),
-    .disp1_is_ebreak(d1_ebrk), .disp1_is_fence(d1_is_fence), .disp1_is_fence_i(d1_is_fence_i),
+    .disp1_is_ebreak(d1_ebrk), .disp1_is_ecall(d1_ecall), .disp1_is_mret(d1_mret), .disp1_illegal(d1_ill),
+    .disp1_is_fence(d1_is_fence), .disp1_is_fence_i(d1_is_fence_i),
     .disp1_is_csr(d1_is_csr), .disp1_is_amo(d1_is_amo), .disp1_ready_init(d1_ready_init),
     .rd0_tag(rat_l0_rs1_t), .rd0_ready(rob_rd0_rdy), .rd0_value(rob_rd0_val),
     .rd1_tag(rat_l0_rs2_t), .rd1_ready(rob_rd1_rdy), .rd1_value(rob_rd1_val),
@@ -558,10 +593,13 @@ rob2w #(.DEPTH(ROB2W_DEPTH), .TAG_W(TAG_W)) u_rob (
     .cdb0_is_br(cdb0_is_br), .cdb0_br_taken(cdb0_br_taken), .cdb0_br_target(cdb0_br_target),
     .cdb0_is_mem(cdb0_is_mem && !csr_exec_fire), .cdb0_mem_we(cdb0_mem_we),
     .cdb0_mem_addr(cdb0_mem_addr), .cdb0_mem_wstrb(cdb0_mem_wstrb), .cdb0_mem_wdata(cdb0_mem_wdata),
+    .cdb0_exc_valid(cdb0_exc_valid), .cdb0_exc_cause(cdb0_exc_cause), .cdb0_exc_tval(cdb0_exc_tval),
     .cdb1_valid(cdb1_valid), .cdb1_tag(cdb1_tag), .cdb1_val(cdb1_val),
     .halted_in(halted), .lsq_sq_empty(sq_and_dc_drained),
     .fence_i_ready(fence_i_cleaned),
     .lsq_head0_replay(lsq_head0_replay), .lsq_head1_replay(lsq_head1_replay),
+    .irq_pending(csr_irq_pending), .irq_cause(csr_irq_cause),
+    .csr_mtvec_in(csr_mtvec_val), .csr_mepc_in(csr_mepc_val),
     .head_valid(rob_head_valid), .head_ready(rob_head_ready), .head_tag(rob_head_tag),
     .head_seq_id(rob_head_seq), .head_pc(rob_head_pc), .head_instr(rob_head_instr),
     .head_is_csr(rob_head_is_csr), .head_is_fence(rob_head_is_fence),
@@ -586,6 +624,9 @@ rob2w #(.DEPTH(ROB2W_DEPTH), .TAG_W(TAG_W)) u_rob (
     .squash_redirect_pc(rob_squash_redirect_pc), .squash_has_older(rob_squash_has_older),
     .full_flush_out(rob_full_flush), .replay_flush_out(rob_replay_flush),
     .full_flush_redirect_pc(rob_full_flush_pc), .full_flush_after_seq(rob_full_flush_after_seq),
+    .trap_enter_out(rob_trap_enter), .trap_is_irq_out(rob_trap_is_irq),
+    .trap_cause_out(rob_trap_cause), .trap_pc_out(rob_trap_pc), .trap_tval_out(rob_trap_tval),
+    .mret_exec_out(rob_mret_exec),
     .cdb0_br_ok(rob_cdb0_br_ok), .cdb0_br_pc(rob_cdb0_br_pc),
     .cdb0_br_is_cond(rob_cdb0_br_is_cond), .cdb0_br_is_jalr(rob_cdb0_br_is_jalr),
     .cdb0_br_ghr(rob_cdb0_br_ghr),
@@ -727,7 +768,7 @@ always @(*) begin
 end
 
 assign disp0_fire = fq0_valid && !halted && !rob_squash && !rob_full_flush && rob_free_ge1 && lane0_rs_ready;
-assign disp1_fire = disp0_fire && fq1_valid && !d0_ebrk && !d0_is_fence_i && rob_free_ge2 && lane1_rs_ready;
+assign disp1_fire = disp0_fire && fq1_valid && !d0_ebrk && !d0_ecall && !d0_mret && !d0_ill && !d0_is_fence_i && rob_free_ge2 && lane1_rs_ready;
 
 // --- RS_ALU ---
 wire        alu0_iss_v, alu1_iss_v, alu0_fu_rdy, alu1_fu_rdy;
@@ -1002,8 +1043,9 @@ end
 wire [31:0] br_comb_target = br_op_is_jalr ? ((br_iss_vj + br_iss_imm) & 32'hFFFF_FFFE)
                                            : (br_iss_pc + br_iss_imm);
 wire [31:0] br_comb_link   = br_iss_pc + 32'd4;
+wire        br_comb_exc    = br_comb_taken && (br_comb_target[1:0] != 2'b00);
 
-reg        br_out_v, br_out_taken;
+reg        br_out_v, br_out_taken, br_out_exc;
 reg [4:0]  br_out_tag;
 reg [31:0] br_out_seq, br_out_val, br_out_target;
 assign br_fu_rdy = !br_out_v || cdb_br_grant;
@@ -1011,7 +1053,7 @@ assign br_fu_rdy = !br_out_v || cdb_br_grant;
 always @(posedge clk or negedge reset_n) begin
     if (!reset_n) begin
         br_out_v <= 1'b0; br_out_tag <= 5'd0; br_out_seq <= 32'd0;
-        br_out_val <= 32'd0; br_out_taken <= 1'b0; br_out_target <= 32'd0;
+        br_out_val <= 32'd0; br_out_taken <= 1'b0; br_out_target <= 32'd0; br_out_exc <= 1'b0;
     end else if (rob_full_flush) begin
         br_out_v <= 1'b0;
     end else if (br_fu_rdy) begin
@@ -1021,6 +1063,7 @@ always @(posedge clk or negedge reset_n) begin
         br_out_val    <= br_comb_link;
         br_out_taken  <= br_comb_taken;
         br_out_target <= br_comb_target;
+        br_out_exc    <= br_comb_exc;
     end else if (rob_squash && ((br_out_tag - rob_head_ptr) > sq_br_age_core)) begin
         br_out_v <= 1'b0;
     end
@@ -1030,10 +1073,10 @@ end
 wire lsq_disp_l0 = disp0_fire && d0_is_mem;
 wire lsq_disp_l1 = disp1_fire && d1_is_mem;
 
-wire        lsu_out_v, lsu_out_mem_we;
+wire        lsu_out_v, lsu_out_mem_we, lsu_out_exc_valid;
 wire [4:0]  lsu_out_tag;
-wire [3:0]  lsu_out_mem_wstrb;
-wire [31:0] lsu_out_seq, lsu_out_val, lsu_out_mem_addr, lsu_out_mem_wdata;
+wire [3:0]  lsu_out_mem_wstrb, lsu_out_exc_cause;
+wire [31:0] lsu_out_seq, lsu_out_val, lsu_out_mem_addr, lsu_out_mem_wdata, lsu_out_exc_tval;
 wire        lsq_trace_issue_v;
 wire [31:0] lsq_trace_issue_seq;
 
@@ -1091,13 +1134,14 @@ lsq2w #(
     .lsu_cdb_tag(lsu_out_tag), .lsu_cdb_seq(lsu_out_seq), .lsu_cdb_val(lsu_out_val),
     .lsu_cdb_mem_we(lsu_out_mem_we), .lsu_cdb_mem_addr(lsu_out_mem_addr),
     .lsu_cdb_mem_wstrb(lsu_out_mem_wstrb), .lsu_cdb_mem_wdata(lsu_out_mem_wdata),
+    .lsu_cdb_exc_valid(lsu_out_exc_valid), .lsu_cdb_exc_cause(lsu_out_exc_cause), .lsu_cdb_exc_tval(lsu_out_exc_tval),
     .dc_req_valid(dc_req_valid), .dc_req_ready(dc_req_ready),
     .dc_req_is_write(dc_req_is_write), .dc_req_is_mmio(dc_req_is_mmio),
     .dc_req_amo_op(dc_req_amo_op),
     .dc_req_addr(dc_req_addr), .dc_req_wdata(dc_req_wdata), .dc_req_wstrb(dc_req_wstrb),
     .dc_req_id(dc_req_id), .dc_req_rob_tag(dc_req_rob_tag),
-    .dc_hit_valid(dc_hit_valid), .dc_hit_id(dc_hit_id), .dc_hit_rdata(dc_hit_rdata),
-    .dc_fill_valid(dc_fill_valid), .dc_fill_id(dc_fill_id), .dc_fill_rdata(dc_fill_rdata),
+    .dc_hit_valid(dc_hit_valid), .dc_hit_id(dc_hit_id), .dc_hit_rdata(dc_hit_rdata), .dc_hit_err(dc_hit_err),
+    .dc_fill_valid(dc_fill_valid), .dc_fill_id(dc_fill_id), .dc_fill_rdata(dc_fill_rdata), .dc_fill_err(dc_fill_err),
     .sq_empty(lsq_sq_empty),
     .trace_issue_valid(lsq_trace_issue_v), .trace_issue_seq(lsq_trace_issue_seq),
     .stat_stlf_hit(stat_stlf_hit),
@@ -1112,10 +1156,13 @@ assign dc_rob_head     = rob_head_ptr;
 // ============================================================================
 // 6. Dual-CDB Arbiter (Port 1 shared cleanly by Head CSR > LSU/AMO)
 // ============================================================================
-wire        p1_valid = csr_exec_req || lsu_out_v;
-wire [4:0]  p1_tag   = csr_exec_req ? rob_head_tag : lsu_out_tag;
-wire [31:0] p1_seq   = csr_exec_req ? rob_head_seq : lsu_out_seq;
-wire [31:0] p1_val   = csr_exec_req ? csr_rdata    : lsu_out_val;
+wire        p1_valid     = csr_exec_req || lsu_out_v;
+wire [4:0]  p1_tag       = csr_exec_req ? rob_head_tag         : lsu_out_tag;
+wire [31:0] p1_seq       = csr_exec_req ? rob_head_seq         : lsu_out_seq;
+wire [31:0] p1_val       = csr_exec_req ? csr_rdata            : lsu_out_val;
+wire        p1_exc_valid = csr_exec_req ? csr_access_illegal   : lsu_out_exc_valid;
+wire [3:0]  p1_exc_cause = csr_exec_req ? MCAUSE_ILLEGAL_INSTR : lsu_out_exc_cause;
+wire [31:0] p1_exc_tval  = csr_exec_req ? rob_head_instr       : lsu_out_exc_tval;
 
 cdb_arbiter2w #(.TAG_W(TAG_W)) u_cdb (
     .div_valid(div_out_v), .div_grant(cdb_div_grant), .div_tag(div_out_tag), .div_seq(div_out_seq), .div_val(div_out_val),
@@ -1124,15 +1171,18 @@ cdb_arbiter2w #(.TAG_W(TAG_W)) u_cdb (
     .lsu_mem_addr(csr_exec_req ? 32'd0 : lsu_out_mem_addr),
     .lsu_mem_wstrb(csr_exec_req ? 4'd0 : lsu_out_mem_wstrb),
     .lsu_mem_wdata(csr_exec_req ? 32'd0 : lsu_out_mem_wdata),
+    .lsu_exc_valid(p1_exc_valid), .lsu_exc_cause(p1_exc_cause), .lsu_exc_tval(p1_exc_tval),
     .mul_valid(mul_out_v), .mul_grant(cdb_mul_grant), .mul_tag(mul_out_tag), .mul_seq(mul_out_seq), .mul_val(mul_out_val),
     .br_valid(br_out_v), .br_grant(cdb_br_grant), .br_tag(br_out_tag), .br_seq(br_out_seq), .br_val(br_out_val),
     .br_taken(br_out_taken), .br_target(br_out_target),
+    .br_exc_valid(br_out_exc), .br_exc_cause(MCAUSE_INSTR_MISALIGN), .br_exc_tval(br_out_target),
     .alu0_valid(alu0_out_v), .alu0_grant(cdb_alu0_grant), .alu0_tag(alu0_out_tag), .alu0_seq(alu0_out_seq), .alu0_val(alu0_out_val),
     .alu1_valid(alu1_out_v), .alu1_grant(cdb_alu1_grant), .alu1_tag(alu1_out_tag), .alu1_seq(alu1_out_seq), .alu1_val(alu1_out_val),
     .cdb0_valid(cdb0_valid), .cdb0_tag(cdb0_tag), .cdb0_seq(cdb0_seq), .cdb0_val(cdb0_val),
     .cdb0_is_br(cdb0_is_br), .cdb0_br_taken(cdb0_br_taken), .cdb0_br_target(cdb0_br_target),
     .cdb0_is_mem(cdb0_is_mem), .cdb0_mem_we(cdb0_mem_we), .cdb0_mem_addr(cdb0_mem_addr),
     .cdb0_mem_wstrb(cdb0_mem_wstrb), .cdb0_mem_wdata(cdb0_mem_wdata),
+    .cdb0_exc_valid(cdb0_exc_valid), .cdb0_exc_cause(cdb0_exc_cause), .cdb0_exc_tval(cdb0_exc_tval),
     .cdb1_valid(cdb1_valid), .cdb1_tag(cdb1_tag), .cdb1_seq(cdb1_seq), .cdb1_val(cdb1_val)
 );
 
@@ -1215,5 +1265,6 @@ assign stat_ras_mispred_cnt         = {1'b0, (rob_c0_valid && rob_c0_uras && rob
 assign stat_replay_flush            = rob_replay_flush;
 assign stat_amo_commit              = rob_c0_valid && (rob_c0_fu == FU_AMO);
 assign stat_fence_commit            = rob_c0_valid && (rob_head_is_fence || rob_c0_is_fence_i);
+assign stat_trap_taken              = rob_trap_enter;
 
 endmodule

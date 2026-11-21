@@ -34,6 +34,8 @@ module decoder (
     output reg  [1:0]  mem_size,
     output reg         mem_unsigned,
     output reg         is_ebreak,
+    output reg         is_ecall,
+    output reg         is_mret,
 
     // Phase 0 Extensions: FENCE / FENCE.I / CSR / RV32A Atomics
     output reg         is_fence,
@@ -86,6 +88,8 @@ always @(*) begin
     mem_size     = MEM_WORD;
     mem_unsigned = 1'b0;
     is_ebreak    = 1'b0;
+    is_ecall     = 1'b0;
+    is_mret      = 1'b0;
     is_fence     = 1'b0;
     is_fence_i   = 1'b0;
     is_csr       = 1'b0;
@@ -364,6 +368,10 @@ always @(*) begin
             fu_type = FU_SYSTEM;
             if (instr == INSTR_EBREAK) begin
                 is_ebreak = 1'b1;
+            end else if (instr == INSTR_ECALL) begin
+                is_ecall = 1'b1;
+            end else if (instr == INSTR_MRET) begin
+                is_mret = 1'b1;
             end else begin
                 case (funct3)
                     CSR_OP_RW, CSR_OP_RS, CSR_OP_RC: begin
@@ -391,6 +399,30 @@ always @(*) begin
             illegal = 1'b1;
         end
     endcase
+
+    // Safe non-mutating clamp on illegal instructions so speculative illegal ops
+    // never allocate RS/LSQ/RAT checkpoints and squash cleanly with zero side effects.
+    if (illegal) begin
+        uses_rs1     = 1'b0;
+        uses_rs2     = 1'b0;
+        rd_we        = 1'b0;
+        fu_type      = FU_SYSTEM;
+        is_branch    = 1'b0;
+        is_jal       = 1'b0;
+        is_jalr      = 1'b0;
+        mem_read     = 1'b0;
+        mem_write    = 1'b0;
+        is_ebreak    = 1'b0;
+        is_ecall     = 1'b0;
+        is_mret      = 1'b0;
+        is_fence     = 1'b0;
+        is_fence_i   = 1'b0;
+        is_csr       = 1'b0;
+        is_amo       = 1'b0;
+        is_lr        = 1'b0;
+        is_sc        = 1'b0;
+        amo_op       = AMO_NONE;
+    end
 end
 
 endmodule

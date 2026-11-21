@@ -120,7 +120,7 @@ wire [127:0] mem_wr_data;
 wire         stat_rob_full, stat_rs_full, stat_lsq_full, stat_cp_full;
 wire         stat_stlf_hit, stat_br_fast_squash, stat_div_ovl, stat_dcm_ovl;
 wire         stat_dual_disp, stat_dual_cdb, stat_dual_commit;
-wire         stat_replay_u, stat_amo_u, stat_fence_u;
+wire         stat_replay_u, stat_amo_u, stat_fence_u, stat_trap_u;
 wire [1:0]   stat_br_total_cnt, stat_br_mispred_cnt, stat_war_waw_cnt;
 wire [3:0]   stat_ex_byp_cnt;
 wire [1:0]   stat_ras_pred_cnt, stat_ras_mispred_cnt;
@@ -149,13 +149,14 @@ ooo2w_core #(
     .dc_req_amo_op(dc_req_amo_op),
     .dc_req_addr(dc_req_addr), .dc_req_wdata(dc_req_wdata), .dc_req_wstrb(dc_req_wstrb),
     .dc_req_id(dc_req_id), .dc_req_rob_tag(dc_req_rob_tag),
-    .dc_hit_valid(dc_hit_valid), .dc_hit_id(dc_hit_id), .dc_hit_rdata(dc_hit_rdata),
-    .dc_fill_valid(dc_fill_valid), .dc_fill_id(dc_fill_id), .dc_fill_rdata(dc_fill_rdata),
+    .dc_hit_valid(dc_hit_valid), .dc_hit_id(dc_hit_id), .dc_hit_rdata(dc_hit_rdata), .dc_hit_err(1'b0),
+    .dc_fill_valid(dc_fill_valid), .dc_fill_id(dc_fill_id), .dc_fill_rdata(dc_fill_rdata), .dc_fill_err(1'b0),
     .dc_flush(dc_flush), .dc_squash_valid(dc_squash_valid),
     .dc_squash_tag(dc_squash_tag), .dc_rob_head(dc_rob_head),
     .dc_clean_all_req(dc_clean_req), .dc_clean_all_done(dc_clean_done),
     .dc_writes_idle(dc_writes_idle), .dc_any_miss(dc_any_miss),
     .coh_snoop_inv_valid(1'b0), .coh_snoop_inv_line(12'd0),
+    .irq_msip(1'b0), .irq_mtip(1'b0), .irq_meip(1'b0),
     .commit0_valid(commit0_valid), .commit0_seq_id(commit0_seq_id),
     .commit0_pc(commit0_pc), .commit0_instr(commit0_instr),
     .commit0_rd_we(commit0_rd_we), .commit0_rd_addr(commit0_rd_addr), .commit0_rd_wdata(commit0_rd_wdata),
@@ -183,7 +184,8 @@ ooo2w_core #(
     .stat_dual_cdb(stat_dual_cdb), .stat_dual_commit(stat_dual_commit),
     .stat_ex_byp_cnt(stat_ex_byp_cnt),
     .stat_ras_pred_cnt(stat_ras_pred_cnt), .stat_ras_mispred_cnt(stat_ras_mispred_cnt),
-    .stat_replay_flush(stat_replay_u), .stat_amo_commit(stat_amo_u), .stat_fence_commit(stat_fence_u)
+    .stat_replay_flush(stat_replay_u), .stat_amo_commit(stat_amo_u), .stat_fence_commit(stat_fence_u),
+    .stat_trap_taken(stat_trap_u)
 );
 
 dcache_nb #(

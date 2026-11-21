@@ -21,7 +21,7 @@ module cdb_arbiter2w #(
     input  wire [31:0]      div_seq,
     input  wire [31:0]      div_val,
 
-    // Port 1: LSU (CDB0)
+    // Port 1: LSU / Head CSR (CDB0)
     input  wire             lsu_valid,
     output reg              lsu_grant,
     input  wire [TAG_W-1:0] lsu_tag,
@@ -31,6 +31,9 @@ module cdb_arbiter2w #(
     input  wire [31:0]      lsu_mem_addr,
     input  wire [3:0]       lsu_mem_wstrb,
     input  wire [31:0]      lsu_mem_wdata,
+    input  wire             lsu_exc_valid,
+    input  wire [3:0]       lsu_exc_cause,
+    input  wire [31:0]      lsu_exc_tval,
 
     // Port 2: MUL (CDB0 or CDB1)
     input  wire             mul_valid,
@@ -47,6 +50,9 @@ module cdb_arbiter2w #(
     input  wire [31:0]      br_val,
     input  wire             br_taken,
     input  wire [31:0]      br_target,
+    input  wire             br_exc_valid,
+    input  wire [3:0]       br_exc_cause,
+    input  wire [31:0]      br_exc_tval,
 
     // Port 4: ALU0 (CDB0 or CDB1)
     input  wire             alu0_valid,
@@ -75,6 +81,9 @@ module cdb_arbiter2w #(
     output reg  [31:0]      cdb0_mem_addr,
     output reg  [3:0]       cdb0_mem_wstrb,
     output reg  [31:0]      cdb0_mem_wdata,
+    output reg              cdb0_exc_valid,
+    output reg  [3:0]       cdb0_exc_cause,
+    output reg  [31:0]      cdb0_exc_tval,
 
     // CDB1 Broadcast Outputs (second value writeback port)
     output reg              cdb1_valid,
@@ -105,6 +114,9 @@ always @(*) begin
     cdb0_mem_addr  = 32'd0;
     cdb0_mem_wstrb = 4'd0;
     cdb0_mem_wdata = 32'd0;
+    cdb0_exc_valid = 1'b0;
+    cdb0_exc_cause = 4'd0;
+    cdb0_exc_tval  = 32'd0;
 
     cdb1_valid     = 1'b0;
     cdb1_tag       = {TAG_W{1'b0}};
@@ -133,6 +145,9 @@ always @(*) begin
         cdb0_mem_addr  = lsu_mem_addr;
         cdb0_mem_wstrb = lsu_mem_wstrb;
         cdb0_mem_wdata = lsu_mem_wdata;
+        cdb0_exc_valid = lsu_exc_valid;
+        cdb0_exc_cause = lsu_exc_cause;
+        cdb0_exc_tval  = lsu_exc_tval;
     end else if (mul_valid) begin
         mul_grant     = 1'b1;
         cdb0_took_mul = 1'b1;
@@ -149,6 +164,9 @@ always @(*) begin
         cdb0_is_br     = 1'b1;
         cdb0_br_taken  = br_taken;
         cdb0_br_target = br_target;
+        cdb0_exc_valid = br_exc_valid;
+        cdb0_exc_cause = br_exc_cause;
+        cdb0_exc_tval  = br_exc_tval;
     end else if (alu0_valid) begin
         alu0_grant     = 1'b1;
         cdb0_took_alu0 = 1'b1;

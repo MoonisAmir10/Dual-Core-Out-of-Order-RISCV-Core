@@ -329,6 +329,8 @@ wire               l2_bc_p, dram_rd_p, dram_wr_p;
 // ============================================================================
 // 5. Core 0 Subsystem (ooo2w_core #0 + icache_2w #0 + dcache_nb_coh #0)
 // ============================================================================
+wire c0_trap_u, c1_trap_u;
+
 ooo2w_core #(
     .CORE_ID(32'd0), .RESET_PC(32'd0), .AWIDTH(AWIDTH), .ID_W(ID_W)
 ) u_core0 (
@@ -342,14 +344,15 @@ ooo2w_core #(
     .dc_req_amo_op(c0_dc_amo),
     .dc_req_addr(c0_dc_addr), .dc_req_wdata(c0_dc_wdata), .dc_req_wstrb(c0_dc_wstrb),
     .dc_req_id(c0_dc_id), .dc_req_rob_tag(c0_dc_rob_tag),
-    .dc_hit_valid(c0_hit_v_mux), .dc_hit_id(c0_hit_id_mux), .dc_hit_rdata(c0_hit_rd_mux),
-    .dc_fill_valid(d0_fill_v), .dc_fill_id(d0_fill_id), .dc_fill_rdata(d0_fill_rd),
+    .dc_hit_valid(c0_hit_v_mux), .dc_hit_id(c0_hit_id_mux), .dc_hit_rdata(c0_hit_rd_mux), .dc_hit_err(1'b0),
+    .dc_fill_valid(d0_fill_v), .dc_fill_id(d0_fill_id), .dc_fill_rdata(d0_fill_rd), .dc_fill_err(1'b0),
     .dc_flush(c0_dc_flush), .dc_squash_valid(c0_dc_sq_v),
     .dc_squash_tag(c0_dc_sq_tag), .dc_rob_head(c0_dc_rob_hd),
     .dc_clean_all_req(c0_dc_cl_req), .dc_clean_all_done(d0_cl_done),
     .dc_writes_idle(d0_wr_idle), .dc_any_miss(d0_any_m),
     .coh_snoop_inv_valid((ENABLE_SNOOP_REPLAY != 0) ? d0_snp_inv_v : 1'b0),
     .coh_snoop_inv_line(d0_snp_inv_la),
+    .irq_msip(1'b0), .irq_mtip(1'b0), .irq_meip(1'b0),
     .commit0_valid(c0_commit0_valid), .commit0_seq_id(c0_commit0_seq_id),
     .commit0_pc(c0_commit0_pc), .commit0_instr(c0_commit0_instr),
     .commit0_rd_we(c0_commit0_rd_we), .commit0_rd_addr(c0_commit0_rd_addr), .commit0_rd_wdata(c0_commit0_rd_wdata),
@@ -373,7 +376,8 @@ ooo2w_core #(
     .stat_div_overlap_cyc(c0_s6), .stat_dcache_miss_overlap_cyc(c0_s7),
     .stat_dual_disp(c0_s8), .stat_dual_cdb(c0_s9), .stat_dual_commit(c0_s10),
     .stat_ex_byp_cnt(c0_exb_u), .stat_ras_pred_cnt(c0_v3), .stat_ras_mispred_cnt(c0_v4),
-    .stat_replay_flush(c0_replay_p), .stat_amo_commit(c0_amo_p), .stat_fence_commit(c0_fence_u)
+    .stat_replay_flush(c0_replay_p), .stat_amo_commit(c0_amo_p), .stat_fence_commit(c0_fence_u),
+    .stat_trap_taken(c0_trap_u)
 );
 
 icache_2w #(
@@ -433,14 +437,15 @@ ooo2w_core #(
     .dc_req_amo_op(c1_dc_amo),
     .dc_req_addr(c1_dc_addr), .dc_req_wdata(c1_dc_wdata), .dc_req_wstrb(c1_dc_wstrb),
     .dc_req_id(c1_dc_id), .dc_req_rob_tag(c1_dc_rob_tag),
-    .dc_hit_valid(c1_hit_v_mux), .dc_hit_id(c1_hit_id_mux), .dc_hit_rdata(c1_hit_rd_mux),
-    .dc_fill_valid(d1_fill_v), .dc_fill_id(d1_fill_id), .dc_fill_rdata(d1_fill_rd),
+    .dc_hit_valid(c1_hit_v_mux), .dc_hit_id(c1_hit_id_mux), .dc_hit_rdata(c1_hit_rd_mux), .dc_hit_err(1'b0),
+    .dc_fill_valid(d1_fill_v), .dc_fill_id(d1_fill_id), .dc_fill_rdata(d1_fill_rd), .dc_fill_err(1'b0),
     .dc_flush(c1_dc_flush), .dc_squash_valid(c1_dc_sq_v),
     .dc_squash_tag(c1_dc_sq_tag), .dc_rob_head(c1_dc_rob_hd),
     .dc_clean_all_req(c1_dc_cl_req), .dc_clean_all_done(d1_cl_done),
     .dc_writes_idle(d1_wr_idle), .dc_any_miss(d1_any_m),
     .coh_snoop_inv_valid((ENABLE_SNOOP_REPLAY != 0) ? d1_snp_inv_v : 1'b0),
     .coh_snoop_inv_line(d1_snp_inv_la),
+    .irq_msip(1'b0), .irq_mtip(1'b0), .irq_meip(1'b0),
     .commit0_valid(c1_commit0_valid), .commit0_seq_id(c1_commit0_seq_id),
     .commit0_pc(c1_commit0_pc), .commit0_instr(c1_commit0_instr),
     .commit0_rd_we(c1_commit0_rd_we), .commit0_rd_addr(c1_commit0_rd_addr), .commit0_rd_wdata(c1_commit0_rd_wdata),
@@ -464,7 +469,8 @@ ooo2w_core #(
     .stat_div_overlap_cyc(c1_s6), .stat_dcache_miss_overlap_cyc(c1_s7),
     .stat_dual_disp(c1_s8), .stat_dual_cdb(c1_s9), .stat_dual_commit(c1_s10),
     .stat_ex_byp_cnt(c1_exb_u), .stat_ras_pred_cnt(c1_v3), .stat_ras_mispred_cnt(c1_v4),
-    .stat_replay_flush(c1_replay_p), .stat_amo_commit(c1_amo_p), .stat_fence_commit(c1_fence_u)
+    .stat_replay_flush(c1_replay_p), .stat_amo_commit(c1_amo_p), .stat_fence_commit(c1_fence_u),
+    .stat_trap_taken(c1_trap_u)
 );
 
 icache_2w #(

@@ -21,7 +21,9 @@ localparam [6:0] OP_AMO      = 7'b0101111; // RV32A: LR.W, SC.W, AMO*.W
 localparam [6:0] OP_SYSTEM   = 7'b1110011; // EBREAK, CSRR*
 
 localparam [31:0] INSTR_NOP    = 32'h0000_0013; // addi x0, x0, 0
-localparam [31:0] INSTR_EBREAK = 32'h0010_0073; // ebreak (clean testbench halt)
+localparam [31:0] INSTR_ECALL  = 32'h0000_0073; // ecall (M-mode environment call)
+localparam [31:0] INSTR_EBREAK = 32'h0010_0073; // ebreak (halt when mtvec==0, trap when mtvec!=0)
+localparam [31:0] INSTR_MRET   = 32'h3020_0073; // mret (return from M-mode trap)
 
 // ----------------------------------------------------------------------------
 // ALU Operation Codes (alu_select[3:0])
@@ -90,7 +92,18 @@ localparam [2:0] CSR_OP_RWI = 3'b101;
 localparam [2:0] CSR_OP_RSI = 3'b110;
 localparam [2:0] CSR_OP_RCI = 3'b111;
 
+localparam [11:0] CSR_FFLAGS    = 12'h001; // FP Accrued Exceptions (Phase U6)
+localparam [11:0] CSR_FRM       = 12'h002; // FP Dynamic Rounding Mode (Phase U6)
+localparam [11:0] CSR_FCSR      = 12'h003; // FP Control and Status (Phase U6)
+localparam [11:0] CSR_MSTATUS   = 12'h300; // M-mode status (RW: MIE, MPIE, MPP=11, FS)
+localparam [11:0] CSR_MISA      = 12'h301; // ISA and extensions (RW-WARL)
+localparam [11:0] CSR_MIE       = 12'h304; // M-mode interrupt-enable (RW: MSIE, MTIE, MEIE)
+localparam [11:0] CSR_MTVEC     = 12'h305; // M-mode trap-handler base/mode (RW: Direct/Vectored)
 localparam [11:0] CSR_MSCRATCH  = 12'h340; // M-mode scratch (RW)
+localparam [11:0] CSR_MEPC      = 12'h341; // M-mode exception PC (RW, 4-byte aligned)
+localparam [11:0] CSR_MCAUSE    = 12'h342; // M-mode trap cause (RW)
+localparam [11:0] CSR_MTVAL     = 12'h343; // M-mode bad address or faulting instruction (RW)
+localparam [11:0] CSR_MIP       = 12'h344; // M-mode interrupt pending (live HW lines)
 localparam [11:0] CSR_MCYCLE    = 12'hB00; // M-mode cycle counter low (RW)
 localparam [11:0] CSR_MINSTRET  = 12'hB02; // M-mode instret counter low (RW)
 localparam [11:0] CSR_MCYCLEH   = 12'hB80; // M-mode cycle counter high (RW)
@@ -103,6 +116,23 @@ localparam [11:0] CSR_MVENDORID = 12'hF11; // Vendor ID (RO)
 localparam [11:0] CSR_MARCHID   = 12'hF12; // Architecture ID (RO)
 localparam [11:0] CSR_MIMPID    = 12'hF13; // Implementation ID (RO)
 localparam [11:0] CSR_MHARTID   = 12'hF14; // Hardware Thread / Core ID (RO)
+
+// ----------------------------------------------------------------------------
+// M-Mode Exception & Interrupt Cause Codes (mcause[3:0])
+// ----------------------------------------------------------------------------
+localparam [3:0] MCAUSE_INSTR_MISALIGN = 4'd0;  // Instruction address misaligned
+localparam [3:0] MCAUSE_INSTR_FAULT    = 4'd1;  // Instruction access fault
+localparam [3:0] MCAUSE_ILLEGAL_INSTR  = 4'd2;  // Illegal instruction
+localparam [3:0] MCAUSE_BREAKPOINT     = 4'd3;  // Breakpoint (EBREAK when mtvec!=0)
+localparam [3:0] MCAUSE_LOAD_MISALIGN  = 4'd4;  // Load address misaligned
+localparam [3:0] MCAUSE_LOAD_FAULT     = 4'd5;  // Load access fault
+localparam [3:0] MCAUSE_STORE_MISALIGN = 4'd6;  // Store/AMO address misaligned
+localparam [3:0] MCAUSE_STORE_FAULT    = 4'd7;  // Store/AMO access fault
+localparam [3:0] MCAUSE_ECALL_M        = 4'd11; // Environment call from M-mode
+
+localparam [3:0] MCAUSE_IRQ_MSI        = 4'd3;  // Machine software interrupt (mcause[31]=1)
+localparam [3:0] MCAUSE_IRQ_MTI        = 4'd7;  // Machine timer interrupt    (mcause[31]=1)
+localparam [3:0] MCAUSE_IRQ_MEI        = 4'd11; // Machine external interrupt (mcause[31]=1)
 
 // ----------------------------------------------------------------------------
 // Memory Access Width (matches funct3[1:0] for LOAD/STORE)

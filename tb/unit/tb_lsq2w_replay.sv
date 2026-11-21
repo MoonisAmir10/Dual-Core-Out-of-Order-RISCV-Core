@@ -41,11 +41,11 @@ reg                 coh_snoop_inv_valid;
 reg  [AWIDTH-5:0]   coh_snoop_inv_line;
 wire                lq_head0_replay, lq_head1_replay;
 
-wire                lsu_cdb_valid, lsu_cdb_mem_we;
+wire                lsu_cdb_valid, lsu_cdb_mem_we, lsu_cdb_exc_valid;
 reg                 lsu_cdb_grant;
 wire [TAG_W-1:0]    lsu_cdb_tag;
-wire [31:0]         lsu_cdb_seq, lsu_cdb_val, lsu_cdb_mem_addr, lsu_cdb_mem_wdata;
-wire [3:0]          lsu_cdb_mem_wstrb;
+wire [31:0]         lsu_cdb_seq, lsu_cdb_val, lsu_cdb_mem_addr, lsu_cdb_mem_wdata, lsu_cdb_exc_tval;
+wire [3:0]          lsu_cdb_mem_wstrb, lsu_cdb_exc_cause;
 
 wire                dc_req_valid, dc_req_is_write, dc_req_is_mmio;
 reg                 dc_req_ready;
@@ -56,7 +56,7 @@ wire [3:0]          dc_req_wstrb;
 wire [ID_W-1:0]     dc_req_id;
 wire [TAG_W-1:0]    dc_req_rob_tag;
 
-reg                 dc_hit_valid, dc_fill_valid;
+reg                 dc_hit_valid, dc_fill_valid, dc_hit_err, dc_fill_err;
 reg  [ID_W-1:0]     dc_hit_id, dc_fill_id;
 reg  [31:0]         dc_hit_rdata, dc_fill_rdata;
 
@@ -93,13 +93,14 @@ lsq2w #(
     .lsu_cdb_tag(lsu_cdb_tag), .lsu_cdb_seq(lsu_cdb_seq), .lsu_cdb_val(lsu_cdb_val),
     .lsu_cdb_mem_we(lsu_cdb_mem_we), .lsu_cdb_mem_addr(lsu_cdb_mem_addr),
     .lsu_cdb_mem_wstrb(lsu_cdb_mem_wstrb), .lsu_cdb_mem_wdata(lsu_cdb_mem_wdata),
+    .lsu_cdb_exc_valid(lsu_cdb_exc_valid), .lsu_cdb_exc_cause(lsu_cdb_exc_cause), .lsu_cdb_exc_tval(lsu_cdb_exc_tval),
     .dc_req_valid(dc_req_valid), .dc_req_ready(dc_req_ready),
     .dc_req_is_write(dc_req_is_write), .dc_req_is_mmio(dc_req_is_mmio),
     .dc_req_amo_op(dc_req_amo_op),
     .dc_req_addr(dc_req_addr), .dc_req_wdata(dc_req_wdata), .dc_req_wstrb(dc_req_wstrb),
     .dc_req_id(dc_req_id), .dc_req_rob_tag(dc_req_rob_tag),
-    .dc_hit_valid(dc_hit_valid), .dc_hit_id(dc_hit_id), .dc_hit_rdata(dc_hit_rdata),
-    .dc_fill_valid(dc_fill_valid), .dc_fill_id(dc_fill_id), .dc_fill_rdata(dc_fill_rdata),
+    .dc_hit_valid(dc_hit_valid), .dc_hit_id(dc_hit_id), .dc_hit_rdata(dc_hit_rdata), .dc_hit_err(dc_hit_err),
+    .dc_fill_valid(dc_fill_valid), .dc_fill_id(dc_fill_id), .dc_fill_rdata(dc_fill_rdata), .dc_fill_err(dc_fill_err),
     .sq_empty(sq_empty), .trace_issue_valid(trace_iv), .trace_issue_seq(trace_iseq),
     .stat_stlf_hit(stat_stlf), .stat_ex_byp_cnt(stat_exb)
 );
@@ -133,8 +134,8 @@ task clear_inputs;
         rob_commit1_load = 1'b0; rob_commit1_tag = 5'd0;
         coh_snoop_inv_valid = 1'b0; coh_snoop_inv_line = 16'd0;
         lsu_cdb_grant = 1'b1; dc_req_ready = 1'b1;
-        dc_hit_valid = 1'b0; dc_hit_id = 7'd0; dc_hit_rdata = 32'd0;
-        dc_fill_valid = 1'b0; dc_fill_id = 7'd0; dc_fill_rdata = 32'd0;
+        dc_hit_valid = 1'b0; dc_hit_id = 7'd0; dc_hit_rdata = 32'd0; dc_hit_err = 1'b0;
+        dc_fill_valid = 1'b0; dc_fill_id = 7'd0; dc_fill_rdata = 32'd0; dc_fill_err = 1'b0;
     end
 endtask
 
@@ -294,12 +295,75 @@ initial begin
     dc_hit_valid = 1'b0;
 
     check(lsu_cdb_valid && (lsu_cdb_tag == 5'd15) && (lsu_cdb_val == 32'd15) &&
-          lsu_cdb_mem_we && (lsu_cdb_mem_wstrb == 4'hF) && (lsu_cdb_mem_wdata == 32'd22),
+          lsu_cdb_mem_we && (lsu_cdb_mem_wstrb == 4'hF) && (lsu_cdb_mem_wdata == 32'd22) && !lsu_cdb_exc_valid,
           "T4: AMOADD CDB0 old=15, RVFI mem_wdata=22");
     step_clk();
 
+    // ------------------------------------------------------------------------
+    // TEST 5 (Phase U1): Misaligned Load/Store/AMO + Bus Access Fault (dc_hit_err)
+    // ------------------------------------------------------------------------
+    flush = 1'b1; step_clk(); flush = 1'b0;
+
+    // 5a. Misaligned LW at 0x502 -> must NOT issue to D$, completes on CDB0 with mcause=4!
+    rob_head      = 5'd20;
+    disp_valid    = 1'b1;
+    disp_is_store = 1'b0;
+    disp_rob_tag  = 5'd20;
+    disp_seq_id   = 32'd50;
+    disp_mem_size = MEM_WORD;
+    disp_vj       = 32'h0000_0502;
+    step_clk();
+    disp_valid    = 1'b0;
+    check(!dc_req_valid && lsu_cdb_valid && lsu_cdb_exc_valid &&
+          (lsu_cdb_exc_cause == MCAUSE_LOAD_MISALIGN) && (lsu_cdb_exc_tval == 32'h0000_0502),
+          "T5a: Misaligned LW suppressed from D$ & reported mcause=4");
+    step_clk();
+
+    // 5b. Misaligned SH at 0x601 -> completes on CDB0 with mcause=6, mem_we=0!
+    flush = 1'b1; step_clk(); flush = 1'b0;
+    rob_head      = 5'd21;
+    disp_valid    = 1'b1;
+    disp_is_store = 1'b1;
+    disp_rob_tag  = 5'd21;
+    disp_seq_id   = 32'd51;
+    disp_mem_size = MEM_HALF;
+    disp_vj       = 32'h0000_0601;
+    disp_vk       = 32'h0000_BEEF;
+    step_clk();
+    disp_valid    = 1'b0;
+    check(lsu_cdb_valid && lsu_cdb_exc_valid && !lsu_cdb_mem_we &&
+          (lsu_cdb_exc_cause == MCAUSE_STORE_MISALIGN) && (lsu_cdb_exc_tval == 32'h0000_0601),
+          "T5b: Misaligned SH reported mcause=6 without mem_we");
+    step_clk();
+
+    // 5c. Bus Access Fault (dc_hit_err=1) on aligned LW -> reported mcause=5!
+    flush = 1'b1; step_clk(); flush = 1'b0;
+    rob_head      = 5'd22;
+    disp_valid    = 1'b1;
+    disp_is_store = 1'b0;
+    disp_rob_tag  = 5'd22;
+    disp_seq_id   = 32'd52;
+    disp_mem_size = MEM_WORD;
+    disp_vj       = 32'h0000_0700;
+    step_clk();
+    disp_valid    = 1'b0;
+    check(dc_req_valid, "T5c: Aligned LW issued to D$/MMIO");
+    saved_id = dc_req_id;
+    step_clk();
+    dc_hit_valid = 1'b1;
+    dc_hit_id    = saved_id;
+    dc_hit_rdata = 32'd0;
+    dc_hit_err   = 1'b1;
+    step_clk();
+    dc_hit_valid = 1'b0;
+    dc_hit_err   = 1'b0;
+    check(lsu_cdb_valid && lsu_cdb_exc_valid &&
+          (lsu_cdb_exc_cause == MCAUSE_LOAD_FAULT) && (lsu_cdb_exc_tval == 32'h0000_0700),
+          "T5c: dc_hit_err reported Load Access Fault mcause=5");
+    step_clk();
+
     if (errors == 0)
-        $display("PASS [tb_lsq2w_replay]: %0d/%0d Phase 1 LSQ replay/barrier/AMO checks passed!", checks, checks);
+        $display("PASS [tb_lsq2w_replay]: %0d/%0d Phase 1+U1 LSQ replay/barrier/AMO/exception checks passed!", checks, checks);
     else begin
         $display("FAIL [tb_lsq2w_replay]: %0d errors out of %0d checks!", errors, checks);
         $fatal(1);

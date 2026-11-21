@@ -39,6 +39,9 @@ module rob2w #(
     input  wire             disp0_pred_bim,
     input  wire             disp0_pred_gsh,
     input  wire             disp0_is_ebreak,
+    input  wire             disp0_is_ecall,
+    input  wire             disp0_is_mret,
+    input  wire             disp0_illegal,
     input  wire             disp0_is_fence,
     input  wire             disp0_is_fence_i,
     input  wire             disp0_is_csr,
@@ -58,6 +61,9 @@ module rob2w #(
     input  wire             disp1_pred_bim,
     input  wire             disp1_pred_gsh,
     input  wire             disp1_is_ebreak,
+    input  wire             disp1_is_ecall,
+    input  wire             disp1_is_mret,
+    input  wire             disp1_illegal,
     input  wire             disp1_is_fence,
     input  wire             disp1_is_fence_i,
     input  wire             disp1_is_csr,
@@ -90,17 +96,24 @@ module rob2w #(
     input  wire [31:0]      cdb0_mem_addr,
     input  wire [3:0]       cdb0_mem_wstrb,
     input  wire [31:0]      cdb0_mem_wdata,
+    input  wire             cdb0_exc_valid,
+    input  wire [3:0]       cdb0_exc_cause,
+    input  wire [31:0]      cdb0_exc_tval,
 
     input  wire             cdb1_valid,
     input  wire [TAG_W-1:0] cdb1_tag,
     input  wire [31:0]      cdb1_val,
 
-    // External commit readiness & replay gates
+    // External commit readiness, replay & M-mode trap/interrupt inputs
     input  wire             halted_in,
     input  wire             lsq_sq_empty,      // sq_empty && dc_writes_idle
     input  wire             fence_i_ready,     // D$ dirty clean-all finished for FENCE.I
     input  wire             lsq_head0_replay,  // Speculative load at h0 was snoop-invalidated!
     input  wire             lsq_head1_replay,  // Speculative load at h1 was snoop-invalidated!
+    input  wire             irq_pending,       // mstatus.MIE && ((mip & mie) != 0)
+    input  wire [3:0]       irq_cause,         // Priority-encoded IRQ cause (MEI>MSI>MTI)
+    input  wire [31:0]      csr_mtvec_in,      // Live mtvec CSR (BASE[31:2], MODE[1:0])
+    input  wire [31:0]      csr_mepc_in,       // Live mepc CSR (4-byte aligned return PC)
 
     // ROB-Head Non-Speculative Execution Observability (CSR / FENCE.I / AMO)
     output wire             head_valid,
@@ -166,10 +179,18 @@ module rob2w #(
     output wire [31:0]      squash_seq_out,
     output wire [31:0]      squash_redirect_pc,
     output wire             squash_has_older,
-    output wire             full_flush_out,        // FENCE.I post-commit OR LQ snoop-replay!
+    output wire             full_flush_out,        // FENCE.I, LQ snoop-replay, Trap, IRQ, or MRET!
     output wire             replay_flush_out,      // Specifically speculative load replay pulse (PMU)
     output wire [31:0]      full_flush_redirect_pc,
     output wire [31:0]      full_flush_after_seq,
+
+    // Precise ROB-Head Trap Entry & MRET Control -> CSR Unit
+    output wire             trap_enter_out,
+    output wire             trap_is_irq_out,
+    output wire [3:0]       trap_cause_out,
+    output wire [31:0]      trap_pc_out,
+    output wire [31:0]      trap_tval_out,
+    output wire             mret_exec_out,
 
     output wire             cdb0_br_ok,
     output wire [31:0]      cdb0_br_pc,
@@ -209,6 +230,10 @@ reg [31:0]      e_mem_addr   [0:DEPTH-1];
 reg [3:0]       e_mem_wstrb  [0:DEPTH-1];
 reg [31:0]      e_mem_wdata  [0:DEPTH-1];
 reg             e_is_ebreak  [0:DEPTH-1];
+reg             e_is_mret    [0:DEPTH-1];
+reg             e_exc_valid  [0:DEPTH-1];
+reg [3:0]       e_exc_cause  [0:DEPTH-1];
+reg [31:0]      e_exc_tval   [0:DEPTH-1];
 reg             e_is_fence   [0:DEPTH-1];
 reg             e_is_fence_i [0:DEPTH-1];
 reg             e_is_csr     [0:DEPTH-1];
@@ -260,12 +285,28 @@ always @(*) begin
     end
 end
 
-// Speculative Load Memory-Order Replay at ROB head (fires before commit0!)
+// Speculative Load Memory-Order Replay at ROB head (Priority 1, fires before commit0!)
 wire h0_replay_fire = head_valid && (e_fu_type[h0] == FU_LOAD) && lsq_head0_replay;
 
+// EBREAK backward-compatibility rule:
+//   - mtvec[31:2] == 0: clean simulation halt (100% compatible with Phases 0-7)
+//   - mtvec[31:2] != 0: standard RISC-V Breakpoint exception (mcause=3, mtval=PC)
+wire        h0_ebreak_trap   = e_is_ebreak[h0] && (csr_mtvec_in[31:2] != 30'd0);
+wire        h0_has_exc       = e_exc_valid[h0] || h0_ebreak_trap;
+wire [3:0]  h0_exc_cause_eff = e_exc_valid[h0] ? e_exc_cause[h0] : MCAUSE_BREAKPOINT;
+wire [31:0] h0_exc_tval_eff  = e_exc_valid[h0] ? e_exc_tval[h0]  : e_pc[h0];
+
+// Asynchronous M-Mode Interrupt (Priority 2: defer 1 insn across in-flight CSR/AMO/FENCE.I)
+wire h0_irq_block = irq_pending && !e_is_amo[h0] && !e_is_fence_i[h0] && !e_is_csr[h0];
+wire h0_irq_fire  = head_valid && !h0_replay_fire && h0_irq_block && lsq_sq_empty;
+
+// Precise Synchronous Exception at ROB head (Priority 3: drain older stores first!)
+wire h0_trap_fire = head_valid && !h0_replay_fire && !h0_irq_block &&
+                    e_ready[h0] && h0_has_exc && lsq_sq_empty;
+
 // Commit Port 0 (older: h0)
-wire h0_needs_sq_drain = e_is_ebreak[h0] || e_is_fence[h0] || e_is_fence_i[h0];
-wire c0_allow          = !halted_in && !h0_replay_fire &&
+wire h0_needs_sq_drain = e_is_ebreak[h0] || e_is_fence[h0] || e_is_fence_i[h0] || e_is_mret[h0];
+wire c0_allow          = !halted_in && !h0_replay_fire && !h0_irq_block && !h0_has_exc &&
                          (!h0_needs_sq_drain || lsq_sq_empty) &&
                          (!e_is_fence_i[h0] || fence_i_ready);
 
@@ -290,16 +331,37 @@ assign commit0_br_taken   = e_act_taken[h0];
 assign commit0_mispred    = commit0_is_br && e_mispred[h0];
 assign commit0_used_ras   = commit0_is_br && e_pred_uras[h0];
 
-// ROB-Head Full Flush: either Speculative Load Replay (re-fetch h0) OR FENCE.I (re-fetch h0+4)
-wire fence_i_flush_fire        = commit0_valid && e_is_fence_i[h0];
-assign replay_flush_out        = h0_replay_fire;
-assign full_flush_out          = h0_replay_fire || fence_i_flush_fire;
-assign full_flush_redirect_pc  = h0_replay_fire ? e_pc[h0] : (e_pc[h0] + 32'd4);
-assign full_flush_after_seq    = h0_replay_fire ? (e_seq_id[h0] - 32'd1) : e_seq_id[h0];
+// ROB-Head Full Flush & Trap/MRET Control
+wire [31:0] mtvec_base         = {csr_mtvec_in[31:2], 2'b00};
+wire [31:0] trap_target_pc     = (h0_irq_fire && csr_mtvec_in[0])
+                               ? (mtvec_base + {26'd0, irq_cause, 2'b00})
+                               : mtvec_base;
+wire        fence_i_flush_fire = commit0_valid && e_is_fence_i[h0];
+wire        mret_flush_fire    = commit0_valid && e_is_mret[h0];
 
-// Commit Port 1 (younger: h1) — never crosses special serializing ops, replay, or 2nd store
-wire h0_serial   = e_is_ebreak[h0] || e_is_fence[h0] || e_is_fence_i[h0] || e_is_csr[h0] || e_is_amo[h0];
-wire h1_serial   = e_is_ebreak[h1] || e_is_fence[h1] || e_is_fence_i[h1] || e_is_csr[h1] || e_is_amo[h1];
+assign trap_enter_out         = h0_irq_fire || h0_trap_fire;
+assign trap_is_irq_out        = h0_irq_fire;
+assign trap_cause_out         = h0_irq_fire ? irq_cause : h0_exc_cause_eff;
+assign trap_pc_out            = e_pc[h0];
+assign trap_tval_out          = h0_irq_fire ? 32'd0 : h0_exc_tval_eff;
+assign mret_exec_out          = mret_flush_fire;
+
+assign replay_flush_out       = h0_replay_fire;
+assign full_flush_out         = h0_replay_fire || h0_irq_fire || h0_trap_fire ||
+                                fence_i_flush_fire || mret_flush_fire;
+assign full_flush_redirect_pc = h0_replay_fire                ? e_pc[h0]       :
+                                (h0_irq_fire || h0_trap_fire) ? trap_target_pc :
+                                mret_flush_fire               ? csr_mepc_in    :
+                                                                (e_pc[h0] + 32'd4);
+assign full_flush_after_seq   = (h0_replay_fire || h0_irq_fire || h0_trap_fire)
+                              ? (e_seq_id[h0] - 32'd1)
+                              : e_seq_id[h0];
+
+// Commit Port 1 (younger: h1) — never crosses special serializing ops, traps, replay, or 2nd store
+wire h0_serial   = e_is_ebreak[h0] || e_is_fence[h0] || e_is_fence_i[h0] || e_is_csr[h0] ||
+                   e_is_amo[h0] || e_is_mret[h0] || e_exc_valid[h0];
+wire h1_serial   = e_is_ebreak[h1] || e_is_fence[h1] || e_is_fence_i[h1] || e_is_csr[h1] ||
+                   e_is_amo[h1] || e_is_mret[h1] || e_exc_valid[h1];
 wire both_stores = (e_fu_type[h0] == FU_STORE) && (e_fu_type[h1] == FU_STORE);
 wire h1_replay_b = (e_fu_type[h1] == FU_LOAD) && lsq_head1_replay;
 
@@ -325,10 +387,10 @@ assign commit1_br_taken  = e_act_taken[h1];
 assign commit1_mispred   = commit1_is_br && e_mispred[h1];
 assign commit1_used_ras  = commit1_is_br && e_pred_uras[h1];
 
-// Branch misprediction detection on CDB0 (suppressed if full_flush takes precedence!)
+// Branch misprediction detection on CDB0 (suppressed if misaligned-target exception or full_flush!)
 wire cdb0_mispred_calc = (cdb0_br_taken != e_pred_taken[cdb0_tag]) ||
                          (cdb0_br_taken && (cdb0_br_target != e_pred_tgt[cdb0_tag]));
-wire cdb0_br_fire      = cdb0_valid && cdb0_is_br && e_valid[cdb0_tag] && !full_flush_out;
+wire cdb0_br_fire      = cdb0_valid && cdb0_is_br && !cdb0_exc_valid && e_valid[cdb0_tag] && !full_flush_out;
 
 assign cdb0_br_ok         = cdb0_br_fire && !cdb0_mispred_calc;
 assign cdb0_br_pc         = e_pc[cdb0_tag];
@@ -396,19 +458,24 @@ always @(posedge clk or negedge reset_n) begin
             e_mem_wstrb[i]  <= 4'd0;
             e_mem_wdata[i]  <= 32'd0;
             e_is_ebreak[i]  <= 1'b0;
+            e_is_mret[i]    <= 1'b0;
+            e_exc_valid[i]  <= 1'b0;
+            e_exc_cause[i]  <= 4'd0;
+            e_exc_tval[i]   <= 32'd0;
             e_is_fence[i]   <= 1'b0;
             e_is_fence_i[i] <= 1'b0;
             e_is_csr[i]     <= 1'b0;
             e_is_amo[i]     <= 1'b0;
         end
     end else if (full_flush_out) begin
-        // Full flush at ROB head (FENCE.I already committed on commit0_valid; Replay did not)
+        // Full flush at ROB head (FENCE.I / MRET committed on commit0_valid; Replay / Trap / IRQ did not)
         head_ptr <= {TAG_W{1'b0}};
         tail_ptr <= {TAG_W{1'b0}};
         count    <= {(TAG_W+1){1'b0}};
         for (i = 0; i < DEPTH; i = i + 1) begin
-            e_valid[i] <= 1'b0;
-            e_ready[i] <= 1'b0;
+            e_valid[i]     <= 1'b0;
+            e_ready[i]     <= 1'b0;
+            e_exc_valid[i] <= 1'b0;
         end
     end else if (squash_out) begin
         e_ready[cdb0_tag]     <= 1'b1;
@@ -423,19 +490,22 @@ always @(posedge clk or negedge reset_n) begin
         end
 
         if (commit0_valid) begin
-            e_valid[h0] <= 1'b0;
-            e_ready[h0] <= 1'b0;
+            e_valid[h0]     <= 1'b0;
+            e_ready[h0]     <= 1'b0;
+            e_exc_valid[h0] <= 1'b0;
         end
         if (commit1_valid) begin
-            e_valid[h1] <= 1'b0;
-            e_ready[h1] <= 1'b0;
+            e_valid[h1]     <= 1'b0;
+            e_ready[h1]     <= 1'b0;
+            e_exc_valid[h1] <= 1'b0;
         end
         head_ptr <= head_ptr + n_comm[TAG_W-1:0];
 
         for (i = 0; i < DEPTH; i = i + 1) begin
             if (e_valid[i] && ((i[TAG_W-1:0] - head_ptr) > sq_br_age)) begin
-                e_valid[i] <= 1'b0;
-                e_ready[i] <= 1'b0;
+                e_valid[i]     <= 1'b0;
+                e_ready[i]     <= 1'b0;
+                e_exc_valid[i] <= 1'b0;
             end
         end
 
@@ -446,12 +516,17 @@ always @(posedge clk or negedge reset_n) begin
         if (cdb0_valid && e_valid[cdb0_tag]) begin
             e_ready[cdb0_tag] <= 1'b1;
             e_value[cdb0_tag] <= cdb0_val;
+            if (cdb0_exc_valid) begin
+                e_exc_valid[cdb0_tag] <= 1'b1;
+                e_exc_cause[cdb0_tag] <= cdb0_exc_cause;
+                e_exc_tval[cdb0_tag]  <= cdb0_exc_tval;
+            end
             if (cdb0_is_br) begin
                 e_act_taken[cdb0_tag] <= cdb0_br_taken;
                 e_act_tgt[cdb0_tag]   <= cdb0_br_target;
-                e_mispred[cdb0_tag]   <= cdb0_mispred_calc;
+                e_mispred[cdb0_tag]   <= cdb0_exc_valid ? 1'b0 : cdb0_mispred_calc;
             end
-            if (cdb0_is_mem) begin
+            if (cdb0_is_mem && !cdb0_exc_valid) begin
                 e_mem_valid[cdb0_tag] <= 1'b1;
                 e_mem_we[cdb0_tag]    <= cdb0_mem_we;
                 e_mem_addr[cdb0_tag]  <= cdb0_mem_addr;
@@ -466,12 +541,14 @@ always @(posedge clk or negedge reset_n) begin
 
         // 2. 2-Wide strict in-order head retirement
         if (commit0_valid) begin
-            e_valid[h0] <= 1'b0;
-            e_ready[h0] <= 1'b0;
+            e_valid[h0]     <= 1'b0;
+            e_ready[h0]     <= 1'b0;
+            e_exc_valid[h0] <= 1'b0;
         end
         if (commit1_valid) begin
-            e_valid[h1] <= 1'b0;
-            e_ready[h1] <= 1'b0;
+            e_valid[h1]     <= 1'b0;
+            e_ready[h1]     <= 1'b0;
+            e_exc_valid[h1] <= 1'b0;
         end
         head_ptr <= head_ptr + n_comm[TAG_W-1:0];
 
@@ -501,6 +578,10 @@ always @(posedge clk or negedge reset_n) begin
             e_mem_wstrb[t0]  <= 4'd0;
             e_mem_wdata[t0]  <= 32'd0;
             e_is_ebreak[t0]  <= disp0_is_ebreak;
+            e_is_mret[t0]    <= disp0_is_mret;
+            e_exc_valid[t0]  <= disp0_illegal || disp0_is_ecall;
+            e_exc_cause[t0]  <= disp0_illegal ? MCAUSE_ILLEGAL_INSTR : MCAUSE_ECALL_M;
+            e_exc_tval[t0]   <= disp0_illegal ? disp0_instr          : 32'd0;
             e_is_fence[t0]   <= disp0_is_fence;
             e_is_fence_i[t0] <= disp0_is_fence_i;
             e_is_csr[t0]     <= disp0_is_csr;
@@ -531,6 +612,10 @@ always @(posedge clk or negedge reset_n) begin
             e_mem_wstrb[t1]  <= 4'd0;
             e_mem_wdata[t1]  <= 32'd0;
             e_is_ebreak[t1]  <= disp1_is_ebreak;
+            e_is_mret[t1]    <= disp1_is_mret;
+            e_exc_valid[t1]  <= disp1_illegal || disp1_is_ecall;
+            e_exc_cause[t1]  <= disp1_illegal ? MCAUSE_ILLEGAL_INSTR : MCAUSE_ECALL_M;
+            e_exc_tval[t1]   <= disp1_illegal ? disp1_instr          : 32'd0;
             e_is_fence[t1]   <= disp1_is_fence;
             e_is_fence_i[t1] <= disp1_is_fence_i;
             e_is_csr[t1]     <= disp1_is_csr;

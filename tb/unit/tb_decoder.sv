@@ -20,7 +20,7 @@ wire [2:0]  br_funct3;
 wire        is_branch, is_jal, is_jalr;
 wire        mem_read, mem_write;
 wire [1:0]  mem_size;
-wire        mem_unsigned, is_ebreak;
+wire        mem_unsigned, is_ebreak, is_ecall, is_mret;
 wire        is_fence, is_fence_i, is_csr;
 wire [2:0]  csr_op;
 wire [11:0] csr_addr;
@@ -38,7 +38,7 @@ decoder dut (
     .asel(asel), .bsel(bsel), .mul_op(mul_op), .div_op(div_op),
     .br_funct3(br_funct3), .is_branch(is_branch), .is_jal(is_jal), .is_jalr(is_jalr),
     .mem_read(mem_read), .mem_write(mem_write), .mem_size(mem_size), .mem_unsigned(mem_unsigned),
-    .is_ebreak(is_ebreak),
+    .is_ebreak(is_ebreak), .is_ecall(is_ecall), .is_mret(is_mret),
     .is_fence(is_fence), .is_fence_i(is_fence_i),
     .is_csr(is_csr), .csr_op(csr_op), .csr_addr(csr_addr), .csr_use_imm(csr_use_imm),
     .is_amo(is_amo), .is_lr(is_lr), .is_sc(is_sc), .amo_op(amo_op),
@@ -180,10 +180,19 @@ initial begin
     check_cond(!illegal && is_csr && csr_use_imm && csr_op == CSR_OP_RCI && !uses_rs1 && rd_we, "CSRRCI");
 
     instr = INSTR_EBREAK; #1;
-    check_cond(!illegal && fu_type == FU_SYSTEM && is_ebreak && !is_csr, "EBREAK");
+    check_cond(!illegal && fu_type == FU_SYSTEM && is_ebreak && !is_ecall && !is_mret && !is_csr, "EBREAK");
+
+    instr = INSTR_ECALL; #1;
+    check_cond(!illegal && fu_type == FU_SYSTEM && is_ecall && !is_ebreak && !is_mret && !is_csr && !rd_we, "ECALL");
+
+    instr = INSTR_MRET; #1;
+    check_cond(!illegal && fu_type == FU_SYSTEM && is_mret && !is_ebreak && !is_ecall && !is_csr && !rd_we, "MRET");
 
     instr = mk_csr(CSR_MSCRATCH, 5'd0, 3'b100, 5'd1); #1; // illegal SYSTEM funct3=4
-    check_cond(illegal, "Illegal SYSTEM f3=4");
+    check_cond(illegal && fu_type == FU_SYSTEM && !rd_we && !uses_rs1 && !uses_rs2, "Illegal SYSTEM f3=4 clamp");
+
+    instr = 32'hFFFF_FFFF; #1; // all-ones illegal opcode
+    check_cond(illegal && fu_type == FU_SYSTEM && !rd_we && !mem_read && !mem_write && !is_branch, "Illegal 0xFFFFFFFF clamp");
 
     if (errors == 0)
         $display("PASS [tb_decoder]: %0d/%0d RV32IMA_Zicsr_Zifencei decoder checks passed!", checks, checks);

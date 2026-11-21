@@ -57,7 +57,15 @@ for _i in range(32):
     ABI_REGS[f"x{_i}"] = _i
 
 CSR_NAMES: Dict[str, int] = {
+    "mstatus":   0x300,
+    "misa":      0x301,
+    "mie":       0x304,
+    "mtvec":     0x305,
     "mscratch":  0x340,
+    "mepc":      0x341,
+    "mcause":    0x342,
+    "mtval":     0x343,
+    "mip":       0x344,
     "mcycle":    0xB00,
     "minstret":  0xB02,
     "mcycleh":   0xB80,
@@ -364,6 +372,8 @@ def _expand_pseudo(mnem: str, ops: List[str]) -> List[Tuple[str, List[str]]]:
         return [("csrrs", [ops[0], "cycle", "x0"])]
     if mnem == "rdinstret":
         return [("csrrs", [ops[0], "instret", "x0"])]
+    if mnem == "la":
+        return [("la_hi", [ops[0], ops[1]]), ("la_lo", [ops[0], ops[1]])]
     if mnem == "li":
         rd = ops[0]
         val = s32(parse_int(ops[1]))
@@ -409,8 +419,27 @@ def assemble(source: str) -> List[int]:
 
     words: List[int] = []
     for cur_pc, mnem, ops in parsed:
-        if mnem == "ebreak":
+        if mnem == ".word":
+            words.append(u32(parse_int(ops[0])))
+        elif mnem == "ecall":
+            words.append(0x0000_0073)
+        elif mnem == "ebreak":
             words.append(0x0010_0073)
+        elif mnem == "mret":
+            words.append(0x3020_0073)
+        elif mnem == "la_hi":
+            rd = parse_reg(ops[0])
+            target = labels[ops[1]] if ops[1] in labels else parse_int(ops[1])
+            delta = target - cur_pc
+            lo12 = sext(delta & 0xFFF, 12)
+            hi20 = ((delta - lo12) >> 12) & 0xFFFFF
+            words.append(enc_u(hi20, rd, 0x17))  # auipc rd, hi20
+        elif mnem == "la_lo":
+            rd = parse_reg(ops[0])
+            target = labels[ops[1]] if ops[1] in labels else parse_int(ops[1])
+            delta = target - (cur_pc - 4)
+            lo12 = sext(delta & 0xFFF, 12)
+            words.append(enc_i(lo12, rd, 0x0, rd, 0x13))  # addi rd, rd, lo12
         elif mnem == "fence":
             if len(ops) == 0:
                 pred, succ = 0xF, 0xF
@@ -554,8 +583,12 @@ def disassemble(word: int) -> str:
         21,
     )
 
+    if word == 0x0000_0073:
+        return "ecall"
     if word == 0x0010_0073:
         return "ebreak"
+    if word == 0x3020_0073:
+        return "mret"
     if op == 0x0F:
         if f3 == 0x0:
             if (word >> 28) == 0x8:
@@ -673,10 +706,44 @@ class RV32IMA_ISS:
         self.core_id = u32(core_id)
         self.resv_valid = False
         self.resv_line = 0
-        # CSR state
+        # CSR & M-mode trap state
+        self.mstatus_mie = 0
+        self.mstatus_mpie = 0
+        self.mstatus_fs = 1
+        self.mie = 0
+        self.mtvec = 0
         self.mscratch = 0
+        self.mepc = 0
+        self.mcause = 0
+        self.mtval = 0
+        self.mip = 0
+        self.misa = 0x4000_1101
         self.mcycle = 0
         self.minstret = 0
+        self.trap_count = 0
+
+    def _mstatus_val(self) -> int:
+        return (
+            ((self.mstatus_fs & 3) << 13)
+            | (3 << 11)
+            | ((self.mstatus_mpie & 1) << 7)
+            | ((self.mstatus_mie & 1) << 3)
+        )
+
+    def _take_trap(self, epc: int, cause: int, tval: int, is_irq: bool = False) -> None:
+        if (self.mtvec & ~3) == 0:
+            raise ValueError(
+                f"Unhandled trap cause={cause} tval=0x{u32(tval):08x} at PC=0x{epc:08x} (mtvec=0)"
+            )
+        self.mepc = epc & ~3
+        self.mcause = ((1 << 31) if is_irq else 0) | (cause & 0xF)
+        self.mtval = u32(tval)
+        self.mstatus_mpie = self.mstatus_mie
+        self.mstatus_mie = 0
+        base = self.mtvec & ~3
+        self.pc = u32(base + ((cause & 0xF) << 2)) if (is_irq and (self.mtvec & 1)) else base
+        self.mcycle += 1
+        self.trap_count += 1
 
     def _read_byte(self, addr: int) -> int:
         return self.dmem[addr % self.mem_size]
@@ -709,9 +776,25 @@ class RV32IMA_ISS:
             raise RuntimeError(f"PC out of instruction memory bounds: 0x{pc:08x}")
         return u32(self.imem[idx])
 
-    def _csr_read(self, csr_addr: int) -> int:
+    def _csr_read(self, csr_addr: int) -> Optional[int]:
+        if csr_addr == 0x300:
+            return self._mstatus_val()
+        if csr_addr == 0x301:
+            return self.misa
+        if csr_addr == 0x304:
+            return self.mie
+        if csr_addr == 0x305:
+            return self.mtvec
         if csr_addr == 0x340:
             return self.mscratch
+        if csr_addr == 0x341:
+            return self.mepc
+        if csr_addr == 0x342:
+            return self.mcause
+        if csr_addr == 0x343:
+            return self.mtval
+        if csr_addr == 0x344:
+            return self.mip
         if csr_addr in (0xB00, 0xC00):
             return self.mcycle & 0xFFFF_FFFF
         if csr_addr in (0xB80, 0xC80):
@@ -728,14 +811,32 @@ class RV32IMA_ISS:
             return 0x0001_0000
         if csr_addr == 0xF14:
             return self.core_id
-        raise ValueError(f"Unsupported CSR address 0x{csr_addr:03x}")
+        return None
 
-    def _csr_write(self, csr_addr: int, val: int) -> None:
+    def _csr_write(self, csr_addr: int, val: int) -> bool:
         if (csr_addr >> 10) == 0x3:
-            raise ValueError(f"Attempted write to read-only CSR 0x{csr_addr:03x}")
+            return False
         v = u32(val)
-        if csr_addr == 0x340:
+        if csr_addr == 0x300:
+            self.mstatus_mie = (v >> 3) & 1
+            self.mstatus_mpie = (v >> 7) & 1
+            self.mstatus_fs = (v >> 13) & 3
+        elif csr_addr == 0x301:
+            pass  # WARL-ignored
+        elif csr_addr == 0x304:
+            self.mie = v & ((1 << 11) | (1 << 7) | (1 << 3))
+        elif csr_addr == 0x305:
+            self.mtvec = v & 0xFFFF_FFFD
+        elif csr_addr == 0x340:
             self.mscratch = v
+        elif csr_addr == 0x341:
+            self.mepc = v & ~3
+        elif csr_addr == 0x342:
+            self.mcause = v
+        elif csr_addr == 0x343:
+            self.mtval = v
+        elif csr_addr == 0x344:
+            pass  # WARL-ignored
         elif csr_addr == 0xB00:
             self.mcycle = (self.mcycle & 0xFFFF_FFFF_0000_0000) | v
         elif csr_addr == 0xB80:
@@ -745,9 +846,10 @@ class RV32IMA_ISS:
         elif csr_addr == 0xB82:
             self.minstret = (self.minstret & 0x0000_0000_FFFF_FFFF) | (v << 32)
         else:
-            raise ValueError(f"Unsupported CSR write 0x{csr_addr:03x}")
+            return False
+        return True
 
-    def step(self) -> CommitEvent:
+    def step(self) -> Optional[CommitEvent]:
         if self.halted:
             raise RuntimeError("ISS already halted")
 
@@ -792,17 +894,30 @@ class RV32IMA_ISS:
         mem_wdata = 0
 
         if instr == 0x0010_0073:  # EBREAK
+            if (self.mtvec & ~3) != 0:
+                self._take_trap(cur_pc, 3, cur_pc)
+                return None
             self.halted = True
+        elif instr == 0x0000_0073:  # ECALL
+            self._take_trap(cur_pc, 11, 0)
+            return None
+        elif instr == 0x3020_0073:  # MRET
+            self.mstatus_mie = self.mstatus_mpie
+            self.mstatus_mpie = 1
+            next_pc = self.mepc
         elif op == 0x0F and f3 in (0x0, 0x1):  # FENCE / FENCE.I
             pass
         elif op == 0x73 and f3 in (0x1, 0x2, 0x3, 0x5, 0x6, 0x7):  # Zicsr
             csr_addr = (instr >> 20) & 0xFFF
             old_val = self._csr_read(csr_addr)
-            rd_we = 1
-            rd_wdata = old_val
             operand = rs1 if (f3 & 4) else v1
             kind = f3 & 3
             wants_write = (kind == 1) or (rs1 != 0)
+            if old_val is None or (wants_write and (csr_addr >> 10) == 0x3):
+                self._take_trap(cur_pc, 2, instr)
+                return None
+            rd_we = 1
+            rd_wdata = old_val
             if wants_write:
                 if kind == 1:
                     new_val = operand
@@ -810,15 +925,24 @@ class RV32IMA_ISS:
                     new_val = old_val | operand
                 else:
                     new_val = old_val & (~operand)
-                self._csr_write(csr_addr, new_val)
+                if not self._csr_write(csr_addr, new_val):
+                    self._take_trap(cur_pc, 2, instr)
+                    return None
         elif op == 0x2F and f3 == 0x2:  # RV32A
             addr = u32(v1)
+            if f5 == 0b00010 and rs2 != 0:
+                self._take_trap(cur_pc, 2, instr)
+                return None
+            if f5 not in AMO_REV:
+                self._take_trap(cur_pc, 2, instr)
+                return None
+            if (addr & 3) != 0:
+                self._take_trap(cur_pc, 4 if f5 == 0b00010 else 6, addr)
+                return None
             mem_valid = 1
             mem_addr = addr
             rd_we = 1
             if f5 == 0b00010:  # LR.W
-                if rs2 != 0:
-                    raise ValueError(f"Illegal LR.W with rs2={rs2} at PC=0x{cur_pc:08x}")
                 rd_wdata = self.read_word(addr)
                 self.resv_valid = True
                 self.resv_line = addr & ~0xF
@@ -854,7 +978,8 @@ class RV32IMA_ISS:
                 elif f5 == 0b11100:  # AMOMAXU
                     nv = old if u32(old) > u32(v2) else v2
                 else:
-                    raise ValueError(f"Illegal AMO funct5={f5:05b} at PC=0x{cur_pc:08x}")
+                    self._take_trap(cur_pc, 2, instr)
+                    return None
                 self.write_word(addr, nv)
                 if self.resv_valid and self.resv_line == (addr & ~0xF):
                     self.resv_valid = False
@@ -869,13 +994,21 @@ class RV32IMA_ISS:
             rd_we = 1
             rd_wdata = u32(cur_pc + imm_u)
         elif op == 0x6F:  # JAL
+            tgt = u32(cur_pc + imm_j)
+            if (tgt & 3) != 0:
+                self._take_trap(cur_pc, 0, tgt)
+                return None
             rd_we = 1
             rd_wdata = u32(cur_pc + 4)
-            next_pc = u32(cur_pc + imm_j)
+            next_pc = tgt
         elif op == 0x67 and f3 == 0x0:  # JALR
+            tgt = u32(v1 + imm_i) & 0xFFFF_FFFE
+            if (tgt & 3) != 0:
+                self._take_trap(cur_pc, 0, tgt)
+                return None
             rd_we = 1
             rd_wdata = u32(cur_pc + 4)
-            next_pc = u32(v1 + imm_i) & 0xFFFF_FFFE
+            next_pc = tgt
         elif op == 0x63:  # BRANCH
             taken = False
             if f3 == 0x0:
@@ -891,11 +1024,22 @@ class RV32IMA_ISS:
             elif f3 == 0x7:
                 taken = u32(v1) >= u32(v2)
             else:
-                raise ValueError(f"Illegal branch funct3={f3} at PC=0x{cur_pc:08x}")
+                self._take_trap(cur_pc, 2, instr)
+                return None
             if taken:
-                next_pc = u32(cur_pc + imm_b)
+                tgt = u32(cur_pc + imm_b)
+                if (tgt & 3) != 0:
+                    self._take_trap(cur_pc, 0, tgt)
+                    return None
+                next_pc = tgt
         elif op == 0x03:  # LOAD
             addr = u32(v1 + imm_i)
+            if f3 not in (0x0, 0x1, 0x2, 0x4, 0x5):
+                self._take_trap(cur_pc, 2, instr)
+                return None
+            if (f3 in (0x1, 0x5) and (addr & 1) != 0) or (f3 == 0x2 and (addr & 3) != 0):
+                self._take_trap(cur_pc, 4, addr)
+                return None
             mem_valid = 1
             mem_we = 0
             mem_addr = addr
@@ -911,11 +1055,15 @@ class RV32IMA_ISS:
                 rd_wdata = self._read_byte(addr)
             elif f3 == 0x5:
                 rd_wdata = self._read_byte(addr) | (self._read_byte(addr + 1) << 8)
-            else:
-                raise ValueError(f"Illegal load funct3={f3} at PC=0x{cur_pc:08x}")
         elif op == 0x23:  # STORE
             addr = u32(v1 + imm_s)
             lane = addr & 0x3
+            if f3 not in (0x0, 0x1, 0x2):
+                self._take_trap(cur_pc, 2, instr)
+                return None
+            if (f3 == 0x1 and (addr & 1) != 0) or (f3 == 0x2 and (addr & 3) != 0):
+                self._take_trap(cur_pc, 6, addr)
+                return None
             mem_valid = 1
             mem_we = 1
             mem_addr = addr
@@ -934,8 +1082,6 @@ class RV32IMA_ISS:
                 self.write_word(addr, v2)
                 mem_wstrb = 0xF
                 mem_wdata = u32(v2)
-            else:
-                raise ValueError(f"Illegal store funct3={f3} at PC=0x{cur_pc:08x}")
         elif op == 0x13:  # OP-IMM
             rd_we = 1
             shamt = rs2
@@ -958,7 +1104,8 @@ class RV32IMA_ISS:
             elif f3 == 0x7:
                 rd_wdata = u32(v1 & u32(imm_i))
             else:
-                raise ValueError(f"Illegal OP-IMM f7={f7:02x} f3={f3} at PC=0x{cur_pc:08x}")
+                self._take_trap(cur_pc, 2, instr)
+                return None
         elif op == 0x33:  # OP (RV32I + RV32M)
             rd_we = 1
             if f7 == 0x01:
@@ -1013,9 +1160,11 @@ class RV32IMA_ISS:
             elif f7 == 0x00 and f3 == 0x7:
                 rd_wdata = u32(v1 & v2)
             else:
-                raise ValueError(f"Illegal OP f7={f7:02x} f3={f3} at PC=0x{cur_pc:08x}")
+                self._take_trap(cur_pc, 2, instr)
+                return None
         else:
-            raise ValueError(f"Illegal instruction 0x{instr:08x} at PC=0x{cur_pc:08x}")
+            self._take_trap(cur_pc, 2, instr)
+            return None
 
         if rd_we and rd != 0:
             self.regs[rd] = u32(rd_wdata)
@@ -1046,8 +1195,12 @@ class RV32IMA_ISS:
 
     def run(self, max_steps: int = 200_000) -> List[CommitEvent]:
         trace: List[CommitEvent] = []
-        while not self.halted and self.steps < max_steps:
-            trace.append(self.step())
+        iters = 0
+        while not self.halted and iters < max_steps:
+            ev = self.step()
+            iters += 1
+            if ev is not None:
+                trace.append(ev)
         if not self.halted:
             raise RuntimeError(f"ISS did not reach EBREAK within {max_steps} steps")
         return trace

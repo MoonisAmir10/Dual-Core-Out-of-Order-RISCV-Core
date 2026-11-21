@@ -178,7 +178,7 @@ wire [1:0]  l2_hits_p, l2_misses_p, l2_wbs_p;
 wire [63:0] clint_mtime_u;
 
 wire        st_u0, st_u1, st_u2, st_u3, st_u4, st_u5, st_u6, st_u7, st_u8, st_u9, st_u10;
-wire        st_dcomm, st_amo, st_fence;
+wire        st_dcomm, st_amo, st_fence, st_trap_u;
 wire [1:0]  st_v0, st_v1, st_v2, st_v3, st_v4;
 wire [3:0]  st_ex_byp;
 
@@ -198,13 +198,14 @@ ooo2w_core #(
     .dc_req_amo_op(core_dc_amo_op),
     .dc_req_addr(core_dc_addr), .dc_req_wdata(core_dc_wdata), .dc_req_wstrb(core_dc_wstrb),
     .dc_req_id(core_dc_id), .dc_req_rob_tag(core_dc_rob_tag),
-    .dc_hit_valid(core_hit_valid), .dc_hit_id(core_hit_id), .dc_hit_rdata(core_hit_rdata),
-    .dc_fill_valid(dc_fill_valid), .dc_fill_id(dc_fill_id), .dc_fill_rdata(dc_fill_rdata),
+    .dc_hit_valid(core_hit_valid), .dc_hit_id(core_hit_id), .dc_hit_rdata(core_hit_rdata), .dc_hit_err(1'b0),
+    .dc_fill_valid(dc_fill_valid), .dc_fill_id(dc_fill_id), .dc_fill_rdata(dc_fill_rdata), .dc_fill_err(1'b0),
     .dc_flush(dc_flush), .dc_squash_valid(dc_squash_valid),
     .dc_squash_tag(dc_squash_tag), .dc_rob_head(dc_rob_head),
     .dc_clean_all_req(dc_clean_req), .dc_clean_all_done(dc_clean_done),
     .dc_writes_idle(dc_writes_idle), .dc_any_miss(dc_any_miss),
     .coh_snoop_inv_valid(1'b0), .coh_snoop_inv_line(16'd0),
+    .irq_msip(1'b0), .irq_mtip(1'b0), .irq_meip(1'b0),
     .commit0_valid(commit0_valid), .commit0_seq_id(commit0_seq_id),
     .commit0_pc(commit0_pc), .commit0_instr(commit0_instr),
     .commit0_rd_we(commit0_rd_we), .commit0_rd_addr(commit0_rd_addr), .commit0_rd_wdata(commit0_rd_wdata),
@@ -231,7 +232,8 @@ ooo2w_core #(
     .stat_div_overlap_cyc(st_u6), .stat_dcache_miss_overlap_cyc(st_u7),
     .stat_dual_disp(st_u8), .stat_dual_cdb(st_u9), .stat_dual_commit(st_dcomm),
     .stat_ex_byp_cnt(st_ex_byp), .stat_ras_pred_cnt(st_v3), .stat_ras_mispred_cnt(st_v4),
-    .stat_replay_flush(st_u10), .stat_amo_commit(st_amo), .stat_fence_commit(st_fence)
+    .stat_replay_flush(st_u10), .stat_amo_commit(st_amo), .stat_fence_commit(st_fence),
+    .stat_trap_taken(st_trap_u)
 );
 
 icache_2w #(

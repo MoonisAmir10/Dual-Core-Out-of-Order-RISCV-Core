@@ -88,6 +88,9 @@ module lsq2w #(
     output reg  [31:0]          lsu_cdb_mem_addr,
     output reg  [3:0]           lsu_cdb_mem_wstrb,
     output reg  [31:0]          lsu_cdb_mem_wdata,
+    output reg                  lsu_cdb_exc_valid,
+    output reg  [3:0]           lsu_cdb_exc_cause,
+    output reg  [31:0]          lsu_cdb_exc_tval,
 
     // Split-Transaction Non-Blocking D-Cache Request Channel
     output wire                 dc_req_valid,
@@ -101,14 +104,16 @@ module lsq2w #(
     output wire [ID_W-1:0]      dc_req_id,
     output wire [TAG_W-1:0]     dc_req_rob_tag,
 
-    // Non-Blocking D-Cache Dual Response Channels (1-cyc Hit + MSHR Fill)
+    // Non-Blocking D-Cache Dual Response Channels (1-cyc Hit + MSHR Fill + Bus Fault)
     input  wire                 dc_hit_valid,
     input  wire [ID_W-1:0]      dc_hit_id,
     input  wire [31:0]          dc_hit_rdata,
+    input  wire                 dc_hit_err,
 
     input  wire                 dc_fill_valid,
     input  wire [ID_W-1:0]      dc_fill_id,
     input  wire [31:0]          dc_fill_rdata,
+    input  wire                 dc_fill_err,
 
     // Status & telemetry
     output wire                 sq_empty,
@@ -125,6 +130,16 @@ localparam integer SQ_IDX_W = 3; // 8 entries
 localparam [1:0] BYP_NONE = 2'b00;
 localparam [1:0] BYP_ALU0 = 2'b01;
 localparam [1:0] BYP_ALU1 = 2'b10;
+
+function automatic is_mem_misaligned(input [1:0] sz, input [1:0] lane);
+    begin
+        case (sz)
+            MEM_HALF: is_mem_misaligned = lane[0];
+            MEM_WORD: is_mem_misaligned = (lane != 2'b00);
+            default:  is_mem_misaligned = 1'b0;
+        endcase
+    end
+endfunction
 
 function automatic [3:0] calc_byte_mask(input [1:0] sz, input [1:0] lane);
     begin
@@ -241,11 +256,13 @@ reg             lq_done       [0:LQ_DEPTH-1];
 reg             lq_cdb_sent   [0:LQ_DEPTH-1]; // Retained until ROB commit for snoop-replay!
 reg             lq_from_stlf  [0:LQ_DEPTH-1]; // STLF reads local store -> immune to ext snoop!
 reg             lq_replay     [0:LQ_DEPTH-1]; // Poisoned by external snoop invalidation!
+reg             lq_exc        [0:LQ_DEPTH-1]; // Bus access fault received from D$/MMIO!
 reg [31:0]      lq_data       [0:LQ_DEPTH-1];
 
 // ROB-Head Non-Speculative Atomic Execution Tracker
 reg             amo_in_flight;
 reg             amo_done;
+reg             amo_exc_r;
 reg [3:0]       amo_op_r;
 reg [TAG_W-1:0] amo_tag_r;
 reg [31:0]      amo_seq_r;
@@ -330,6 +347,17 @@ wire [31:0] disp_addr_eff = disp_vj_eff + disp_imm;
 wire do_disp_load  = disp_valid && !disp_is_store && disp_ready_load;
 wire do_disp_store = disp_valid &&  disp_is_store && disp_ready_store;
 
+// Combinational misaligned-load detector (evaluated on live bypassed lq_addr_eff)
+reg [LQ_DEPTH-1:0] lq_is_misalign;
+integer mi;
+always @(*) begin
+    mi = 0;
+    for (mi = 0; mi < LQ_DEPTH; mi = mi + 1) begin
+        lq_is_misalign[mi] = lq_valid[mi] && lq_addr_valid[mi] &&
+                             is_mem_misaligned(lq_size[mi], lq_addr_eff[mi][1:0]);
+    end
+end
+
 // ----------------------------------------------------------------------------
 // 2b. Combinational Speculative Load Snoop-Invalidation Replay Detection!
 // ----------------------------------------------------------------------------
@@ -348,7 +376,7 @@ always @(*) begin
     lq_head0_replay  = 1'b0;
     lq_head1_replay  = 1'b0;
     for (sni = 0; sni < LQ_DEPTH; sni = sni + 1) begin
-        if (lq_valid[sni] && !lq_from_stlf[sni]) begin
+        if (lq_valid[sni] && !lq_from_stlf[sni] && !lq_exc[sni] && !lq_is_misalign[sni]) begin
             // Detect snoop match on any SPECULATIVE load (lq_rob_tag != rob_head) that has
             // received data (or is receiving right now). Exempting an unpoisoned load that is
             // already at rob_head guarantees forward progress (zero false-sharing livelock under
@@ -402,7 +430,8 @@ always @(*) begin
         lq_stlf_data[li1] = 32'd0;
         lq_can_cache[li1] = 1'b0;
 
-        if (lq_valid[li1] && lq_addr_valid[li1] && !lq_issued[li1] && !lq_done[li1] && !lq_cdb_sent[li1] &&
+        if (lq_valid[li1] && lq_addr_valid[li1] && !lq_is_misalign[li1] &&
+            !lq_issued[li1] && !lq_done[li1] && !lq_cdb_sent[li1] &&
             !(squash_valid && ((lq_rob_tag[li1] - rob_head) > sq_br_age)) &&
             !(barrier_valid && ((lq_rob_tag[li1] - rob_head) > bar_age))) begin
             older_cnt   = lq_sq_snap[li1] - sq_head;
@@ -415,7 +444,8 @@ always @(*) begin
                 if (si1[3:0] < older_cnt) begin
                     s_ptr = sq_head + si1[3:0];
                     s_idx = s_ptr[2:0];
-                    if (!sq_addr_valid[s_idx]) begin
+                    if (!sq_addr_valid[s_idx] ||
+                        is_mem_misaligned(sq_size[s_idx], sq_addr_eff[s_idx][1:0])) begin
                         l_blocked = 1'b1;
                     end else if (sq_addr_eff[s_idx][31:2] == lq_addr_eff[li1][31:2]) begin
                         s_wstrb = calc_byte_mask(sq_size[s_idx], sq_addr_eff[s_idx][1:0]);
@@ -495,9 +525,11 @@ end
 wire [2:0] sq_head_idx = sq_head[2:0];
 wire [2:0] sq_tail_idx = sq_tail[2:0];
 
+wire amo_addr_misalign = amo_req_valid && (amo_req_addr[1:0] != 2'b00);
+
 wire dc_start_store = sq_has_comm_drn;
 wire dc_start_amo   = !sq_has_comm_drn && sq_empty && dc_writes_idle &&
-                      amo_req_valid && !amo_in_flight && !amo_done && !flush;
+                      amo_req_valid && !amo_addr_misalign && !amo_in_flight && !amo_done && !flush;
 wire dc_start_load  = !sq_has_comm_drn && !dc_start_amo && !amo_in_flight &&
                       cache_ld_pick_v && !flush && !squash_valid;
 
@@ -572,6 +604,9 @@ always @(*) begin
     lsu_cdb_mem_addr  = 32'd0;
     lsu_cdb_mem_wstrb = 4'd0;
     lsu_cdb_mem_wdata = 32'd0;
+    lsu_cdb_exc_valid = 1'b0;
+    lsu_cdb_exc_cause = 4'd0;
+    lsu_cdb_exc_tval  = 32'd0;
 
     cdb_sel_kind      = 2'd0;
     cdb_sel_ld_idx    = 3'd0;
@@ -585,14 +620,31 @@ always @(*) begin
         cdb_sel_kind      = 2'd1;
         lsu_cdb_tag       = amo_tag_r;
         lsu_cdb_seq       = amo_seq_r;
-        lsu_cdb_val       = amo_rdata_r;
-        lsu_cdb_mem_we    = amo_rvfi_we;
+        lsu_cdb_val       = amo_exc_r ? 32'd0 : amo_rdata_r;
+        lsu_cdb_mem_we    = amo_exc_r ? 1'b0  : amo_rvfi_we;
         lsu_cdb_mem_addr  = amo_addr_r;
-        lsu_cdb_mem_wstrb = amo_rvfi_we ? 4'hF : 4'd0;
-        lsu_cdb_mem_wdata = amo_rvfi_we ? amo_rvfi_wdat : 32'd0;
+        lsu_cdb_mem_wstrb = (amo_rvfi_we && !amo_exc_r) ? 4'hF : 4'd0;
+        lsu_cdb_mem_wdata = (amo_rvfi_we && !amo_exc_r) ? amo_rvfi_wdat : 32'd0;
+        lsu_cdb_exc_valid = amo_exc_r;
+        lsu_cdb_exc_cause = (amo_op_r == AMO_LR) ? MCAUSE_LOAD_FAULT : MCAUSE_STORE_FAULT;
+        lsu_cdb_exc_tval  = amo_addr_r;
+    end else if (amo_addr_misalign && !amo_in_flight && !amo_done && !flush) begin
+        // Misaligned ROB-head LR.W / SC.W / AMO*.W -> report exception without D$ issue!
+        lsu_cdb_valid     = 1'b1;
+        cdb_sel_kind      = 2'd0;
+        lsu_cdb_tag       = amo_req_tag;
+        lsu_cdb_seq       = amo_req_seq;
+        lsu_cdb_val       = 32'd0;
+        lsu_cdb_mem_we    = 1'b0;
+        lsu_cdb_mem_addr  = amo_req_addr;
+        lsu_cdb_mem_wstrb = 4'd0;
+        lsu_cdb_mem_wdata = 32'd0;
+        lsu_cdb_exc_valid = 1'b1;
+        lsu_cdb_exc_cause = (amo_req_op == AMO_LR) ? MCAUSE_LOAD_MISALIGN : MCAUSE_STORE_MISALIGN;
+        lsu_cdb_exc_tval  = amo_req_addr;
     end else begin
         for (li3 = 0; li3 < LQ_DEPTH; li3 = li3 + 1) begin
-            if (lq_valid[li3] && lq_done[li3] && !lq_cdb_sent[li3] && !flush) begin
+            if (lq_valid[li3] && (lq_done[li3] || lq_is_misalign[li3]) && !lq_cdb_sent[li3] && !flush) begin
                 if (!lsu_cdb_valid || ((lq_rob_tag[li3] - rob_head) < cdb_best_age)) begin
                     lsu_cdb_valid     = 1'b1;
                     cdb_sel_kind      = 2'd2;
@@ -600,11 +652,14 @@ always @(*) begin
                     cdb_best_age      = lq_rob_tag[li3] - rob_head;
                     lsu_cdb_tag       = lq_rob_tag[li3];
                     lsu_cdb_seq       = lq_seq_id[li3];
-                    lsu_cdb_val       = lq_data[li3];
+                    lsu_cdb_val       = (lq_is_misalign[li3] || lq_exc[li3]) ? 32'd0 : lq_data[li3];
                     lsu_cdb_mem_we    = 1'b0;
                     lsu_cdb_mem_addr  = lq_addr_eff[li3];
                     lsu_cdb_mem_wstrb = 4'd0;
                     lsu_cdb_mem_wdata = 32'd0;
+                    lsu_cdb_exc_valid = lq_is_misalign[li3] || lq_exc[li3];
+                    lsu_cdb_exc_cause = lq_is_misalign[li3] ? MCAUSE_LOAD_MISALIGN : MCAUSE_LOAD_FAULT;
+                    lsu_cdb_exc_tval  = lq_addr_eff[li3];
                 end
             end
         end
@@ -615,17 +670,31 @@ always @(*) begin
                     sq_scan_ptr = sq_commit_ptr + si3[3:0];
                     sq_scan_idx = sq_scan_ptr[2:0];
                     if (!lsu_cdb_valid && sq_addr_valid[sq_scan_idx] &&
-                        !sq_qk_valid[sq_scan_idx] && !sq_cdb_sent[sq_scan_idx]) begin
+                        (!sq_qk_valid[sq_scan_idx] ||
+                         is_mem_misaligned(sq_size[sq_scan_idx], sq_addr_eff[sq_scan_idx][1:0])) &&
+                        !sq_cdb_sent[sq_scan_idx]) begin
                         lsu_cdb_valid     = 1'b1;
                         cdb_sel_kind      = 2'd3;
                         cdb_sel_st_idx    = sq_scan_idx;
                         lsu_cdb_tag       = sq_rob_tag[sq_scan_idx];
                         lsu_cdb_seq       = sq_seq_id[sq_scan_idx];
                         lsu_cdb_val       = 32'd0;
-                        lsu_cdb_mem_we    = 1'b1;
                         lsu_cdb_mem_addr  = sq_addr_eff[sq_scan_idx];
-                        lsu_cdb_mem_wstrb = calc_byte_mask(sq_size[sq_scan_idx], sq_addr_eff[sq_scan_idx][1:0]);
-                        lsu_cdb_mem_wdata = align_store_data(sq_size[sq_scan_idx], sq_addr_eff[sq_scan_idx][1:0], sq_vk_eff[sq_scan_idx]);
+                        if (is_mem_misaligned(sq_size[sq_scan_idx], sq_addr_eff[sq_scan_idx][1:0])) begin
+                            lsu_cdb_mem_we    = 1'b0;
+                            lsu_cdb_mem_wstrb = 4'd0;
+                            lsu_cdb_mem_wdata = 32'd0;
+                            lsu_cdb_exc_valid = 1'b1;
+                            lsu_cdb_exc_cause = MCAUSE_STORE_MISALIGN;
+                            lsu_cdb_exc_tval  = sq_addr_eff[sq_scan_idx];
+                        end else begin
+                            lsu_cdb_mem_we    = 1'b1;
+                            lsu_cdb_mem_wstrb = calc_byte_mask(sq_size[sq_scan_idx], sq_addr_eff[sq_scan_idx][1:0]);
+                            lsu_cdb_mem_wdata = align_store_data(sq_size[sq_scan_idx], sq_addr_eff[sq_scan_idx][1:0], sq_vk_eff[sq_scan_idx]);
+                            lsu_cdb_exc_valid = 1'b0;
+                            lsu_cdb_exc_cause = 4'd0;
+                            lsu_cdb_exc_tval  = 32'd0;
+                        end
                     end
                 end
             end
@@ -658,6 +727,7 @@ always @(posedge clk or negedge reset_n) begin
         sq_tail       <= 4'd0;
         amo_in_flight <= 1'b0;
         amo_done      <= 1'b0;
+        amo_exc_r     <= 1'b0;
         amo_op_r      <= AMO_NONE;
         amo_tag_r     <= {TAG_W{1'b0}};
         amo_seq_r     <= 32'd0;
@@ -699,6 +769,7 @@ always @(posedge clk or negedge reset_n) begin
             lq_cdb_sent[k]   <= 1'b0;
             lq_from_stlf[k]  <= 1'b0;
             lq_replay[k]     <= 1'b0;
+            lq_exc[k]        <= 1'b0;
             lq_data[k]       <= 32'd0;
         end
     end else begin
@@ -707,6 +778,7 @@ always @(posedge clk or negedge reset_n) begin
             sq_head <= sq_head + 4'd1;
         end else if (dc_amo_fire) begin
             amo_in_flight <= 1'b1;
+            amo_exc_r     <= 1'b0;
             amo_op_r      <= amo_req_op;
             amo_tag_r     <= amo_req_tag;
             amo_seq_r     <= amo_req_seq;
@@ -721,10 +793,12 @@ always @(posedge clk or negedge reset_n) begin
             if (dc_hit_is_amo && amo_in_flight) begin
                 amo_in_flight <= 1'b0;
                 amo_done      <= 1'b1;
+                amo_exc_r     <= dc_hit_err;
                 amo_rdata_r   <= dc_hit_rdata;
             end else if (dc_hit_valid && !dc_hit_is_amo && lq_valid[hit_idx] &&
                          lq_issued[hit_idx] && (hit_gen == lq_gen[hit_idx])) begin
                 lq_done[hit_idx] <= 1'b1;
+                lq_exc[hit_idx]  <= dc_hit_err;
                 lq_data[hit_idx] <= format_load_data(lq_size[hit_idx], lq_uns[hit_idx],
                                                      lq_addr_eff[hit_idx][1:0], dc_hit_rdata);
             end
@@ -732,10 +806,12 @@ always @(posedge clk or negedge reset_n) begin
             if (dc_fill_is_amo && amo_in_flight) begin
                 amo_in_flight <= 1'b0;
                 amo_done      <= 1'b1;
+                amo_exc_r     <= dc_fill_err;
                 amo_rdata_r   <= dc_fill_rdata;
             end else if (dc_fill_valid && !dc_fill_is_amo && lq_valid[fill_idx] &&
                          lq_issued[fill_idx] && (fill_gen == lq_gen[fill_idx])) begin
                 lq_done[fill_idx] <= 1'b1;
+                lq_exc[fill_idx]  <= dc_fill_err;
                 lq_data[fill_idx] <= format_load_data(lq_size[fill_idx], lq_uns[fill_idx],
                                                       lq_addr_eff[fill_idx][1:0], dc_fill_rdata);
             end
@@ -746,6 +822,7 @@ always @(posedge clk or negedge reset_n) begin
             sq_tail       <= sq_commit_ptr;
             amo_in_flight <= 1'b0;
             amo_done      <= 1'b0;
+            amo_exc_r     <= 1'b0;
             for (k = 0; k < LQ_DEPTH; k = k + 1) begin
                 if (lq_valid[k]) lq_gen[k] <= lq_gen[k] + 3'd1;
                 lq_valid[k]    <= 1'b0;
@@ -753,6 +830,7 @@ always @(posedge clk or negedge reset_n) begin
                 lq_done[k]     <= 1'b0;
                 lq_cdb_sent[k] <= 1'b0;
                 lq_replay[k]   <= 1'b0;
+                lq_exc[k]      <= 1'b0;
                 lq_qj_byp[k]   <= BYP_NONE;
             end
             for (k = 0; k < SQ_DEPTH; k = k + 1) begin
@@ -854,13 +932,15 @@ always @(posedge clk or negedge reset_n) begin
                 lq_issued[stlf_pick_idx]    <= 1'b1;
                 lq_done[stlf_pick_idx]      <= 1'b1;
                 lq_from_stlf[stlf_pick_idx] <= 1'b1;
+                lq_exc[stlf_pick_idx]       <= 1'b0;
                 lq_data[stlf_pick_idx]      <= lq_stlf_data[stlf_pick_idx];
             end
 
             // 3. CDB0 completion broadcast (loads stay valid in LQ until ROB commit!)
             if (lsu_cdb_valid && lsu_cdb_grant) begin
                 if (cdb_sel_kind == 2'd1) begin
-                    amo_done <= 1'b0;
+                    amo_done  <= 1'b0;
+                    amo_exc_r <= 1'b0;
                 end else if (cdb_sel_kind == 2'd2) begin
                     lq_cdb_sent[cdb_sel_ld_idx] <= 1'b1;
                 end else if (cdb_sel_kind == 2'd3) begin
@@ -881,6 +961,7 @@ always @(posedge clk or negedge reset_n) begin
                     lq_done[k]     <= 1'b0;
                     lq_cdb_sent[k] <= 1'b0;
                     lq_replay[k]   <= 1'b0;
+                    lq_exc[k]      <= 1'b0;
                     lq_qj_byp[k]   <= BYP_NONE;
                     lq_gen[k]      <= lq_gen[k] + 3'd1;
                 end
@@ -896,6 +977,7 @@ always @(posedge clk or negedge reset_n) begin
                         lq_done[k]     <= 1'b0;
                         lq_cdb_sent[k] <= 1'b0;
                         lq_replay[k]   <= 1'b0;
+                        lq_exc[k]      <= 1'b0;
                         lq_qj_byp[k]   <= BYP_NONE;
                         lq_gen[k]      <= lq_gen[k] + 3'd1;
                     end
@@ -918,6 +1000,7 @@ always @(posedge clk or negedge reset_n) begin
                 lq_cdb_sent[lq_free_idx]   <= 1'b0;
                 lq_from_stlf[lq_free_idx]  <= 1'b0;
                 lq_replay[lq_free_idx]     <= 1'b0;
+                lq_exc[lq_free_idx]        <= 1'b0;
                 lq_data[lq_free_idx]       <= 32'd0;
             end else if (do_disp_store) begin
                 sq_rob_tag[sq_tail_idx]    <= disp_rob_tag;
