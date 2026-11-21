@@ -44,6 +44,7 @@ from typing import Deque, Dict, List, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
+import ieee754_oracle as fpo  # noqa: E402
 import rv32ima_asm as isa  # noqa: E402
 from rv32ima_asm import s32, sext, u32  # noqa: E402
 
@@ -65,6 +66,8 @@ class CommitRec:
     mem_addr: int
     mem_wstrb: int
     mem_wdata: int
+    rd_is_fp: int = 0
+    fflags: int = 0
 
 
 @dataclasses.dataclass
@@ -159,6 +162,7 @@ class CheckStats:
     fences_checked: int = 0
     fence_i_checked: int = 0
     mmio_ops: int = 0
+    fp_ops_checked: int = 0
 
 
 class CheckError(RuntimeError):
@@ -240,7 +244,7 @@ def parse_trace_log(log_path: Path) -> Tuple[List[CommitRec], List[WriteEvt], Li
         p = line.split()
         tag = p[0]
         if tag == "C":
-            if len(p) != 13:
+            if len(p) not in (13, 15):
                 raise CheckError(f"Malformed C record at line {lineno}: {line}")
             commits.append(
                 CommitRec(
@@ -256,6 +260,8 @@ def parse_trace_log(log_path: Path) -> Tuple[List[CommitRec], List[WriteEvt], Li
                     mem_addr=int(p[10], 16),
                     mem_wstrb=int(p[11], 16),
                     mem_wdata=int(p[12], 16),
+                    rd_is_fp=int(p[13]) if len(p) == 15 else 0,
+                    fflags=int(p[14], 16) if len(p) == 15 else 0,
                 )
             )
         elif tag == "W":
@@ -326,8 +332,14 @@ def _audit_core_stream(
     List[Tuple[int, str, int]],  # timeline of core ops: (c_idx, 'W'|'L'|'B', list_idx)
 ]:
     regs = [0] * 32
+    fregs = [0] * 32
     pc = 0
     mscratch = 0
+    mstatus_mie = 0
+    mstatus_mpie = 0
+    mstatus_fs = 1
+    fflags_csr = 0
+    frm_csr = 0
     last_mcycle = -1
     last_minstret = -1
     halted = False
@@ -387,7 +399,9 @@ def _audit_core_stream(
 
         next_pc = u32(pc + 4)
         exp_rd_we = 0
+        exp_rd_is_fp = 0
         exp_rd_wdata: Optional[int] = 0
+        exp_fflags = 0
         exp_mem_v = 0
         exp_mem_we: Optional[int] = 0
         exp_mem_addr = 0
@@ -413,8 +427,18 @@ def _audit_core_stream(
         elif op == 0x73 and f3 in (0x1, 0x2, 0x3, 0x5, 0x6, 0x7):  # Zicsr
             csr_addr = (instr >> 20) & 0xFFF
             exp_rd_we = 1
-            if csr_addr == 0x340:
-                old_val: Optional[int] = mscratch
+            if csr_addr == 0x001:
+                old_val: Optional[int] = fflags_csr
+            elif csr_addr == 0x002:
+                old_val = frm_csr
+            elif csr_addr == 0x003:
+                old_val = ((frm_csr & 7) << 5) | (fflags_csr & 0x1F)
+            elif csr_addr == 0x300:
+                old_val = ((mstatus_fs & 3) << 13) | (3 << 11) | ((mstatus_mpie & 1) << 7) | ((mstatus_mie & 1) << 3)
+            elif csr_addr == 0x301:
+                old_val = 0x4000_1121
+            elif csr_addr == 0x340:
+                old_val = mscratch
             elif csr_addr == 0xF11:
                 old_val = 0x0000_0000
             elif csr_addr == 0xF12:
@@ -450,13 +474,24 @@ def _audit_core_stream(
             operand = rs1 if (f3 & 4) else v1
             kind = f3 & 3
             wants_write = (kind == 1) or (rs1 != 0)
-            if wants_write and csr_addr == 0x340:
-                if kind == 1:
-                    mscratch = u32(operand)
-                elif kind == 2:
-                    mscratch = u32(mscratch | operand)
-                else:
-                    mscratch = u32(mscratch & (~operand))
+            if wants_write and old_val is not None:
+                nv = u32(operand) if kind == 1 else (u32(old_val | operand) if kind == 2 else u32(old_val & (~operand)))
+                if csr_addr == 0x001:
+                    fflags_csr = nv & 0x1F
+                    mstatus_fs = 3
+                elif csr_addr == 0x002:
+                    frm_csr = nv & 0x7
+                    mstatus_fs = 3
+                elif csr_addr == 0x003:
+                    fflags_csr = nv & 0x1F
+                    frm_csr = (nv >> 5) & 0x7
+                    mstatus_fs = 3
+                elif csr_addr == 0x300:
+                    mstatus_mie = (nv >> 3) & 1
+                    mstatus_mpie = (nv >> 7) & 1
+                    mstatus_fs = (nv >> 13) & 3
+                elif csr_addr == 0x340:
+                    mscratch = nv
         elif op == 0x2F and f3 == 0x2:  # RV32A (LR.W / SC.W / 9x AMO*.W)
             addr = u32(v1)
             laddr = (addr >> 4) & 0xFFFF
@@ -755,26 +790,153 @@ def _audit_core_stream(
                 exp_rd_wdata = u32(v1 & v2)
             else:
                 raise CheckError(f"[Core {core}] Illegal OP f7={f7:02x} f3={f3} at PC=0x{pc:08x}")
+        elif op == 0x07 and f3 == 0x2:  # FLW
+            addr = u32(v1 + imm_i)
+            laddr = (addr >> 4) & 0xFFFF
+            exp_rd_we = 1
+            exp_rd_is_fp = 1
+            exp_rd_wdata = None
+            exp_mem_v = 1
+            exp_mem_we = 0
+            exp_mem_addr = addr
+            exp_mem_wstrb = 0
+            exp_mem_wdata = 0
+            is_mmio = (addr >> 24) == 0x02
+            if is_mmio:
+                stats.mmio_ops += 1
+            stats.fp_ops_checked += 1
+            lidx = len(loads_out)
+            loads_out.append(
+                ArchLoadOp(
+                    c_idx=c_idx,
+                    commit_cyc=ev.cyc,
+                    bar_epoch=bar_epoch,
+                    pc=pc,
+                    addr=addr,
+                    laddr=laddr,
+                    size=4,
+                    unsigned=True,
+                    obs_val=ev.rd_wdata,  # f0 is writable!
+                    is_lr=False,
+                    is_mmio=is_mmio,
+                )
+            )
+            op_order.append((c_idx, "L", lidx))
+        elif op == 0x27 and f3 == 0x2:  # FSW
+            addr = u32(v1 + imm_s)
+            laddr = (addr >> 4) & 0xFFFF
+            fv2 = fregs[rs2]
+            exp_mem_v = 1
+            exp_mem_we = 1
+            exp_mem_addr = addr
+            exp_mem_wstrb = 0xF
+            exp_mem_wdata = u32(fv2)
+            stats.fp_ops_checked += 1
+            if (addr >> 24) == 0x02:
+                stats.mmio_ops += 1
+            else:
+                stats.stores_checked += 1
+                widx = len(writes_out)
+                writes_out.append(
+                    ArchWriteOp(
+                        c_idx=c_idx,
+                        commit_cyc=ev.cyc,
+                        bar_epoch=bar_epoch,
+                        addr=addr,
+                        laddr=laddr,
+                        wstrb=0xF,
+                        wdata=u32(fv2),
+                        is_amo=False,
+                        amo_f5=0,
+                        amo_rs2=0,
+                        rd_addr=0,
+                        obs_rd=0,
+                        is_sc=False,
+                    )
+                )
+                op_order.append((c_idx, "W", widx))
+        elif op in (0x43, 0x47, 0x4B, 0x4F) and ((instr >> 25) & 3) == 0:  # FMADD..FNMADD.S
+            eff_rm = frm_csr if f3 == 7 else f3
+            rs3 = (instr >> 27) & 0x1F
+            fma_op = {0x43: fpo.FMA_FMADD, 0x47: fpo.FMA_FMSUB, 0x4B: fpo.FMA_FNMSUB, 0x4F: fpo.FMA_FNMADD}[op]
+            exp_rd_wdata, exp_fflags = fpo.eval_fma(fma_op, fregs[rs1], fregs[rs2], fregs[rs3], eff_rm)
+            exp_rd_we = 1
+            exp_rd_is_fp = 1
+            stats.fp_ops_checked += 1
+        elif op == 0x53:  # OP-FP
+            eff_rm = frm_csr if f3 == 7 else f3
+            fv1 = fregs[rs1]
+            fv2 = fregs[rs2]
+            stats.fp_ops_checked += 1
+            if f7 == 0x00:
+                exp_rd_wdata, exp_fflags = fpo.eval_fma(fpo.FMA_FADD, fv1, fv2, 0, eff_rm)
+                exp_rd_we, exp_rd_is_fp = 1, 1
+            elif f7 == 0x04:
+                exp_rd_wdata, exp_fflags = fpo.eval_fma(fpo.FMA_FSUB, fv1, fv2, 0, eff_rm)
+                exp_rd_we, exp_rd_is_fp = 1, 1
+            elif f7 == 0x08:
+                exp_rd_wdata, exp_fflags = fpo.eval_fma(fpo.FMA_FMUL, fv1, fv2, 0, eff_rm)
+                exp_rd_we, exp_rd_is_fp = 1, 1
+            elif f7 == 0x0C:
+                exp_rd_wdata, exp_fflags = fpo.eval_div_sqrt(fpo.FDIV_DIV, fv1, fv2, eff_rm)
+                exp_rd_we, exp_rd_is_fp = 1, 1
+            elif f7 == 0x2C and rs2 == 0:
+                exp_rd_wdata, exp_fflags = fpo.eval_div_sqrt(fpo.FDIV_SQRT, fv1, 0, eff_rm)
+                exp_rd_we, exp_rd_is_fp = 1, 1
+            elif f7 == 0x10 and f3 in (0, 1, 2):
+                mop = [fpo.FMISC_SGNJ, fpo.FMISC_SGNJN, fpo.FMISC_SGNJX][f3]
+                exp_rd_wdata, exp_fflags = fpo.eval_misc(mop, fv1, fv2, 0)
+                exp_rd_we, exp_rd_is_fp = 1, 1
+            elif f7 == 0x14 and f3 in (0, 1):
+                mop = fpo.FMISC_MIN if f3 == 0 else fpo.FMISC_MAX
+                exp_rd_wdata, exp_fflags = fpo.eval_misc(mop, fv1, fv2, 0)
+                exp_rd_we, exp_rd_is_fp = 1, 1
+            elif f7 == 0x50 and f3 in (0, 1, 2):
+                mop = [fpo.FMISC_LE, fpo.FMISC_LT, fpo.FMISC_EQ][f3]
+                exp_rd_wdata, exp_fflags = fpo.eval_misc(mop, fv1, fv2, 0)
+                exp_rd_we, exp_rd_is_fp = 1, 0
+            elif f7 == 0x60 and rs2 in (0, 1):
+                mop = fpo.FMISC_CVT_WS if rs2 == 0 else fpo.FMISC_CVT_WUS
+                exp_rd_wdata, exp_fflags = fpo.eval_misc(mop, fv1, 0, eff_rm)
+                exp_rd_we, exp_rd_is_fp = 1, 0
+            elif f7 == 0x68 and rs2 in (0, 1):
+                mop = fpo.FMISC_CVT_SW if rs2 == 0 else fpo.FMISC_CVT_SWU
+                exp_rd_wdata, exp_fflags = fpo.eval_misc(mop, v1, 0, eff_rm)
+                exp_rd_we, exp_rd_is_fp = 1, 1
+            elif f7 == 0x70 and rs2 == 0 and f3 in (0, 1):
+                mop = fpo.FMISC_MV_XW if f3 == 0 else fpo.FMISC_CLASS
+                exp_rd_wdata, exp_fflags = fpo.eval_misc(mop, fv1, 0, 0)
+                exp_rd_we, exp_rd_is_fp = 1, 0
+            elif f7 == 0x78 and rs2 == 0 and f3 == 0:
+                exp_rd_wdata, exp_fflags = fpo.eval_misc(fpo.FMISC_MV_WX, v1, 0, 0)
+                exp_rd_we, exp_rd_is_fp = 1, 1
+            else:
+                raise CheckError(f"[Core {core}] Illegal OP-FP f7={f7:02x} f3={f3} rs2={rs2} at PC=0x{pc:08x}")
         else:
             raise CheckError(f"[Core {core}] Illegal instr 0x{instr:08x} at PC=0x{pc:08x}")
 
-        # Hardware clears rd_we when rd == 0
-        if rd == 0:
+        # Hardware clears rd_we for integer x0 (NOT FP f0!)
+        if not exp_rd_is_fp and rd == 0:
             exp_rd_we = 0
             exp_rd_addr = 0
             exp_rd_wdata = 0
         else:
             exp_rd_addr = rd if exp_rd_we else 0
 
-        if ev.rd_we != exp_rd_we or ev.rd_addr != exp_rd_addr:
+        if ev.rd_we != exp_rd_we or ev.rd_addr != exp_rd_addr or (exp_rd_we and ev.rd_is_fp != exp_rd_is_fp):
             raise CheckError(
-                f"[Core {core}] rd_we/addr mismatch at PC=0x{pc:08x} cyc={ev.cyc} ({isa.disassemble(instr)}): "
-                f"exp=({exp_rd_we},x{exp_rd_addr}) got=({ev.rd_we},x{ev.rd_addr})"
+                f"[Core {core}] rd_we/fp/addr mismatch at PC=0x{pc:08x} cyc={ev.cyc} ({isa.disassemble(instr)}): "
+                f"exp=({exp_rd_we},fp={exp_rd_is_fp},r{exp_rd_addr}) got=({ev.rd_we},fp={ev.rd_is_fp},r{ev.rd_addr})"
             )
         if exp_rd_wdata is not None and ev.rd_wdata != exp_rd_wdata:
             raise CheckError(
                 f"[Core {core}] rd_wdata mismatch at PC=0x{pc:08x} cyc={ev.cyc} ({isa.disassemble(instr)}): "
                 f"exp=0x{exp_rd_wdata:08x} got=0x{ev.rd_wdata:08x}"
+            )
+        if ev.fflags != exp_fflags:
+            raise CheckError(
+                f"[Core {core}] fflags mismatch at PC=0x{pc:08x} cyc={ev.cyc} ({isa.disassemble(instr)}): "
+                f"exp=0x{exp_fflags:02x} got=0x{ev.fflags:02x}"
             )
         if ev.mem_v != exp_mem_v:
             raise CheckError(
@@ -800,7 +962,15 @@ def _audit_core_stream(
                     f"exp=0x{exp_mem_wdata:08x} got=0x{ev.mem_wdata:08x}"
                 )
 
-        if ev.rd_we and ev.rd_addr != 0:
+        if exp_fflags != 0:
+            fflags_csr = (fflags_csr | exp_fflags) & 0x1F
+            if mstatus_fs != 0:
+                mstatus_fs = 3
+        if ev.rd_we and exp_rd_is_fp:
+            fregs[ev.rd_addr] = u32(ev.rd_wdata)
+            if mstatus_fs != 0:
+                mstatus_fs = 3
+        elif ev.rd_we and ev.rd_addr != 0:
             regs[ev.rd_addr] = u32(ev.rd_wdata)
         pc = next_pc
 
@@ -820,11 +990,15 @@ def _verify_global_writes(
     init_lines: Dict[int, int],
     stats: CheckStats,
 ) -> Dict[int, List[LineVersion]]:
-    # Map each core's barrier epoch -> commit cycle of previous barrier (for causal tracking)
+    # Map each core's barrier epoch -> commit cycle of previous barrier (causal) & next barrier (drain bound)
     prev_bar_cyc: List[Dict[int, int]] = [{0: 0}, {0: 0}]
+    next_bar_cyc: List[Dict[int, int]] = [{}, {}]
     for c in (0, 1):
         for b in core_barriers[c]:
             prev_bar_cyc[c][b.bar_epoch] = b.commit_cyc
+            prev_ep = b.bar_epoch - 1
+            if prev_ep not in next_bar_cyc[c] or b.commit_cyc < next_bar_cyc[c][prev_ep]:
+                next_bar_cyc[c][prev_ep] = b.commit_cyc
 
     core_lrs: List[List[ArchLoadOp]] = [
         [ld for ld in core_loads[0] if ld.is_lr],
@@ -899,6 +1073,15 @@ def _verify_global_writes(
 
             g_idx, we, prev_line = wlist[wi]
             head = alist[ai]
+
+            nb_cyc = next_bar_cyc[c].get(head.bar_epoch)
+            if nb_cyc is not None and we.cyc > nb_cyc:
+                last_err[0] = (
+                    f"[Core {c}] Barrier store-drain violation: store (epoch={head.bar_epoch}, "
+                    f"commit={head.commit_cyc}) matched W#{g_idx} at cyc={we.cyc} > barrier cyc={nb_cyc}!"
+                )
+                memo_fail.add((wi, ai))
+                return False
 
             if head.is_amo or head.is_sc:
                 # AMOs & SC.W execute solo at ROB head (never coalesce!)
@@ -1199,8 +1382,10 @@ def _verify_disjoint_iss(
                 r.pc != g.pc
                 or r.instr != g.instr
                 or r.rd_we != g.rd_we
+                or (g.rd_we and r.rd_is_fp != g.rd_is_fp)
                 or r.rd_addr != g.rd_addr
                 or r.rd_wdata != g.rd_wdata
+                or r.fflags != g.fflags
                 or r.mem_v != g.mem_valid
                 or r.mem_we != g.mem_we
                 or r.mem_addr != g.mem_addr

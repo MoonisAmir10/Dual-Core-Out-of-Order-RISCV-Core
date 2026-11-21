@@ -141,6 +141,8 @@ wire [127:0] mem_wr_data;
 
 wire        st_rob_u, st_rs_u, st_lsq_u, st_cp_u, st_stlf, st_fsq_u, st_div_u, st_dcm_u;
 wire        st_dd_u, st_dc_u, st_dcomm, st_replay, st_amo, st_fence, st_trap_u;
+wire        c0_rd_fp_u, c1_rd_fp_u;
+wire [4:0]  c0_fflags_u, c1_fflags_u;
 wire [1:0]  st_br_tot, st_br_misp, st_ww_u, st_ras_p, st_ras_m;
 wire [3:0]  st_ex_byp;
 
@@ -172,12 +174,12 @@ ooo2w_core #(
     .irq_msip(1'b0), .irq_mtip(1'b0), .irq_meip(1'b0),
     .commit0_valid(commit0_valid), .commit0_seq_id(commit0_seq_id),
     .commit0_pc(commit0_pc), .commit0_instr(commit0_instr),
-    .commit0_rd_we(commit0_rd_we), .commit0_rd_addr(commit0_rd_addr), .commit0_rd_wdata(commit0_rd_wdata),
+    .commit0_rd_we(commit0_rd_we), .commit0_rd_is_fp(c0_rd_fp_u), .commit0_rd_addr(commit0_rd_addr), .commit0_rd_wdata(commit0_rd_wdata), .commit0_fflags(c0_fflags_u),
     .commit0_mem_valid(commit0_mem_valid), .commit0_mem_we(commit0_mem_we),
     .commit0_mem_addr(commit0_mem_addr), .commit0_mem_wstrb(commit0_mem_wstrb), .commit0_mem_wdata(commit0_mem_wdata),
     .commit1_valid(commit1_valid), .commit1_seq_id(commit1_seq_id),
     .commit1_pc(commit1_pc), .commit1_instr(commit1_instr),
-    .commit1_rd_we(commit1_rd_we), .commit1_rd_addr(commit1_rd_addr), .commit1_rd_wdata(commit1_rd_wdata),
+    .commit1_rd_we(commit1_rd_we), .commit1_rd_is_fp(c1_rd_fp_u), .commit1_rd_addr(commit1_rd_addr), .commit1_rd_wdata(commit1_rd_wdata), .commit1_fflags(c1_fflags_u),
     .commit1_mem_valid(commit1_mem_valid), .commit1_mem_we(commit1_mem_we),
     .commit1_mem_addr(commit1_mem_addr), .commit1_mem_wstrb(commit1_mem_wstrb), .commit1_mem_wdata(commit1_mem_wdata),
     .trace_disp0_valid(trace_disp0_valid), .trace_disp0_seq(trace_disp0_seq),

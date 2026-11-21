@@ -1,9 +1,12 @@
 `timescale 1ns / 1ps
 
 // ============================================================================
-// Full M-Mode / U-Mode Zicsr & Trap/Interrupt Control Unit (Phase U1)
+// Full M-Mode / U-Mode Zicsr, Trap/Interrupt & RV32F FCSR Unit (Phase U1 + U6)
 //
 // Supported CSRs:
+//   - 0x001 fflags    (RW, MISA_EXT_F=1 & FS!=0): FP accrued exceptions [4:0]
+//   - 0x002 frm       (RW, MISA_EXT_F=1 & FS!=0): FP dynamic rounding mode [2:0]
+//   - 0x003 fcsr      (RW, MISA_EXT_F=1 & FS!=0): {24'd0, frm[2:0], fflags[4:0]}
 //   - 0x300 mstatus   (RW): MIE[3], MPIE[7], MPP[12:11]=2'b11, FS[14:13]
 //   - 0x301 misa      (RW-WARL): RV32IMA (+F when MISA_EXT_F=1)
 //   - 0x304 mie       (RW): MSIE[3], MTIE[7], MEIE[11]
@@ -17,17 +20,7 @@
 //   - 0xB02/0xB82 minstret / minstreth (RW): 64-bit live 2-wide commit counter
 //   - 0xC00/0xC80 cycle / cycleh       (RO): User-mode shadow of mcycle
 //   - 0xC02/0xC82 instret / instreth   (RO): User-mode shadow of minstret
-//   - 0xF11 mvendorid (RO): 0x0000_0000
-//   - 0xF12 marchid   (RO): 0x0000_2002 (Dual-Core 2W OoO ID)
-//   - 0xF13 mimpid    (RO): 0x0001_0000 (v1.0)
-//   - 0xF14 mhartid   (RO): Hardware Thread / Core ID (parameter CORE_ID)
-//
-// Spec Compliance:
-//   - CSRRS/CSRRC with rs1==x0 (or CSRRSI/CSRRCI with uimm==0) perform a pure
-//     read without writing, allowing legal reads of read-only CSRs (mhartid!).
-//   - Writing any read-only CSR (csr_addr[11:10]==2'b11) or accessing an
-//     unimplemented CSR asserts csr_access_illegal / csr_illegal with no write.
-//   - M-mode interrupt priority: MEI(11) > MSI(3) > MTI(7) when mstatus.MIE==1.
+//   - 0xF11..0xF14 mvendorid, marchid, mimpid, mhartid (RO)
 // ============================================================================
 module csr_unit #(
     parameter [31:0] CORE_ID    = 32'd0,
@@ -40,6 +33,10 @@ module csr_unit #(
     // 2-Wide Retirement Pulse (0, 1, or 2 instructions committed this cycle)
     input  wire [1:0]  retire_cnt,
 
+    // In-Order Non-Blocking FP Retirement Accrued Flags & FS Dirty Update (Phase U6)
+    input  wire        fp_commit_dirty,
+    input  wire [4:0]  fp_commit_fflags,
+
     // Non-speculative CSR Access Port (executed cleanly at ROB head)
     input  wire        csr_req_valid,
     input  wire [2:0]  csr_op,
@@ -50,6 +47,7 @@ module csr_unit #(
     output reg  [31:0] csr_rdata,
     output wire        csr_access_illegal, // combinational legality (independent of csr_req_valid)
     output wire        csr_illegal,        // csr_req_valid && csr_access_illegal
+    output wire        csr_sync_required,  // 1 when a legal CSR write mutates mstatus/frm/fcsr!
 
     // External Hardware Interrupt Lines (CLINT + PLIC)
     input  wire        irq_msip,
@@ -64,12 +62,14 @@ module csr_unit #(
     input  wire [31:0] trap_tval,
     input  wire        mret_exec,
 
-    // Live Trap/Interrupt & Status Outputs -> ROB / Core
+    // Live Trap/Interrupt & FP Status Outputs -> ROB / Decoder / Core
     output wire [31:0] mtvec_out,
     output wire [31:0] mepc_out,
     output wire        irq_pending,
     output wire [3:0]  irq_cause,
     output wire [1:0]  mstatus_fs_out,
+    output wire [2:0]  frm_out,
+    output wire [4:0]  fflags_out,
 
     // Live counter observability outputs
     output wire [63:0] mcycle_out,
@@ -78,10 +78,12 @@ module csr_unit #(
 
 `include "rv32ima_defs.vh"
 
-// M-Mode Trap & Status Registers
+// M-Mode Trap, Status & FP Control Registers
 reg        mstatus_mie_r;
 reg        mstatus_mpie_r;
 reg [1:0]  mstatus_fs_r;
+reg [4:0]  fflags_r;
+reg [2:0]  frm_r;
 reg        mie_msie_r;
 reg        mie_mtie_r;
 reg        mie_meie_r;
@@ -102,6 +104,8 @@ wire [31:0] mip_val     = {20'd0, irq_meip,   3'd0, irq_mtip,   3'd0, irq_msip, 
 assign mtvec_out      = mtvec_r;
 assign mepc_out       = mepc_r;
 assign mstatus_fs_out = mstatus_fs_r;
+assign frm_out        = frm_r;
+assign fflags_out     = fflags_r;
 assign mcycle_out     = mcycle_r;
 assign minstret_out   = minstret_r;
 
@@ -116,10 +120,24 @@ assign irq_cause   = mei_pend ? MCAUSE_IRQ_MEI :
                                 MCAUSE_IRQ_MTI;
 
 // Combinational CSR Read Mux & Address Decode
+wire fp_csr_enabled = MISA_EXT_F && (mstatus_fs_r != 2'b00);
+
 reg csr_addr_valid;
 always @(*) begin
     csr_addr_valid = 1'b1;
     case (csr_addr)
+        CSR_FFLAGS: begin
+            csr_rdata      = {27'd0, fflags_r};
+            csr_addr_valid = fp_csr_enabled;
+        end
+        CSR_FRM: begin
+            csr_rdata      = {29'd0, frm_r};
+            csr_addr_valid = fp_csr_enabled;
+        end
+        CSR_FCSR: begin
+            csr_rdata      = {24'd0, frm_r, fflags_r};
+            csr_addr_valid = fp_csr_enabled;
+        end
         CSR_MSTATUS:   csr_rdata = mstatus_val;
         CSR_MISA:      csr_rdata = misa_val;
         CSR_MIE:       csr_rdata = mie_val;
@@ -159,6 +177,11 @@ wire        is_ro_csr   = (csr_addr[11:10] == 2'b11);
 assign csr_access_illegal = (!op_valid || !csr_addr_valid || (wants_write && is_ro_csr));
 assign csr_illegal        = csr_req_valid && csr_access_illegal;
 
+// Any legal CSR write to mstatus, frm, or fcsr flushes younger speculative FP ops at commit
+// so younger instructions re-decode with the exact new mstatus.FS and frm!
+assign csr_sync_required  = wants_write && !csr_access_illegal &&
+                            ((csr_addr == CSR_MSTATUS) || (csr_addr == CSR_FRM) || (csr_addr == CSR_FCSR));
+
 wire        do_write = csr_req_valid && wants_write && !csr_access_illegal;
 
 reg [31:0] csr_wdata;
@@ -178,7 +201,9 @@ always @(posedge clk or negedge reset_n) begin
     if (!reset_n) begin
         mstatus_mie_r  <= 1'b0;
         mstatus_mpie_r <= 1'b0;
-        mstatus_fs_r   <= 2'b01; // Initial (ready for Phase U6 FP)
+        mstatus_fs_r   <= 2'b01; // Initial (FP enabled on boot per bare-metal convention)
+        fflags_r       <= 5'd0;
+        frm_r          <= 3'd0;  // RNE default
         mie_msie_r     <= 1'b0;
         mie_mtie_r     <= 1'b0;
         mie_meie_r     <= 1'b0;
@@ -190,9 +215,15 @@ always @(posedge clk or negedge reset_n) begin
         mcycle_r       <= 64'd0;
         minstret_r     <= 64'd0;
     end else begin
-        // Default live counter increments
+        // Default live counter & non-blocking FP commit updates
         mcycle_r   <= mcycle_inc;
         minstret_r <= minstret_inc;
+        if (MISA_EXT_F) begin
+            if (fp_commit_fflags != 5'd0)
+                fflags_r <= fflags_r | fp_commit_fflags;
+            if (fp_commit_dirty && (mstatus_fs_r != 2'b00))
+                mstatus_fs_r <= 2'b11; // Dirty!
+        end
 
         // Atomic Trap Entry > MRET > Explicit CSR Write
         if (trap_enter) begin
@@ -206,6 +237,19 @@ always @(posedge clk or negedge reset_n) begin
             mstatus_mpie_r <= 1'b1;
         end else if (do_write) begin
             case (csr_addr)
+                CSR_FFLAGS: begin
+                    fflags_r     <= csr_wdata[4:0];
+                    mstatus_fs_r <= 2'b11;
+                end
+                CSR_FRM: begin
+                    frm_r        <= csr_wdata[2:0];
+                    mstatus_fs_r <= 2'b11;
+                end
+                CSR_FCSR: begin
+                    fflags_r     <= csr_wdata[4:0];
+                    frm_r        <= csr_wdata[7:5];
+                    mstatus_fs_r <= 2'b11;
+                end
                 CSR_MSTATUS: begin
                     mstatus_mie_r  <= csr_wdata[3];
                     mstatus_mpie_r <= csr_wdata[7];

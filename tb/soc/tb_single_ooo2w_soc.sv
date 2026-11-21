@@ -15,16 +15,16 @@ reg         clk, reset_n, dram_jitter_en;
 
 wire        commit0_valid, commit1_valid;
 wire [31:0] commit0_seq_id, commit0_pc, commit0_instr;
-wire        commit0_rd_we;
-wire [4:0]  commit0_rd_addr;
+wire        commit0_rd_we, commit0_rd_is_fp;
+wire [4:0]  commit0_rd_addr, commit0_fflags;
 wire [31:0] commit0_rd_wdata;
 wire        commit0_mem_valid, commit0_mem_we;
 wire [31:0] commit0_mem_addr, commit0_mem_wdata;
 wire [3:0]  commit0_mem_wstrb;
 
 wire [31:0] commit1_seq_id, commit1_pc, commit1_instr;
-wire        commit1_rd_we;
-wire [4:0]  commit1_rd_addr;
+wire        commit1_rd_we, commit1_rd_is_fp;
+wire [4:0]  commit1_rd_addr, commit1_fflags;
 wire [31:0] commit1_rd_wdata;
 wire        commit1_mem_valid, commit1_mem_we;
 wire [31:0] commit1_mem_addr, commit1_mem_wdata;
@@ -68,12 +68,12 @@ single_ooo2w_soc #(
     .clk(clk), .reset_n(reset_n), .dram_jitter_en(dram_jitter_en),
     .commit0_valid(commit0_valid), .commit0_seq_id(commit0_seq_id),
     .commit0_pc(commit0_pc), .commit0_instr(commit0_instr),
-    .commit0_rd_we(commit0_rd_we), .commit0_rd_addr(commit0_rd_addr), .commit0_rd_wdata(commit0_rd_wdata),
+    .commit0_rd_we(commit0_rd_we), .commit0_rd_is_fp(commit0_rd_is_fp), .commit0_rd_addr(commit0_rd_addr), .commit0_rd_wdata(commit0_rd_wdata), .commit0_fflags(commit0_fflags),
     .commit0_mem_valid(commit0_mem_valid), .commit0_mem_we(commit0_mem_we),
     .commit0_mem_addr(commit0_mem_addr), .commit0_mem_wstrb(commit0_mem_wstrb), .commit0_mem_wdata(commit0_mem_wdata),
     .commit1_valid(commit1_valid), .commit1_seq_id(commit1_seq_id),
     .commit1_pc(commit1_pc), .commit1_instr(commit1_instr),
-    .commit1_rd_we(commit1_rd_we), .commit1_rd_addr(commit1_rd_addr), .commit1_rd_wdata(commit1_rd_wdata),
+    .commit1_rd_we(commit1_rd_we), .commit1_rd_is_fp(commit1_rd_is_fp), .commit1_rd_addr(commit1_rd_addr), .commit1_rd_wdata(commit1_rd_wdata), .commit1_fflags(commit1_fflags),
     .commit1_mem_valid(commit1_mem_valid), .commit1_mem_we(commit1_mem_we),
     .commit1_mem_addr(commit1_mem_addr), .commit1_mem_wstrb(commit1_mem_wstrb), .commit1_mem_wdata(commit1_mem_wdata),
     .trace_disp0_valid(trace_disp0_valid), .trace_disp0_seq(trace_disp0_seq),
@@ -128,7 +128,7 @@ reg [31:0] hex_words [0:16383];
 
 integer trace_fd, uart_fd, commit_idx, cmp_errors, max_cycles, sim_cyc;
 integer stim_cnt, pwm0_hi, pwm0_edges, pwm1_hi, pwm1_edges, uart_bytes;
-reg     has_trace, has_uart, gpio_stim_en, expect_x14_en, prev_pwm0, prev_pwm1;
+reg     has_trace, has_fp_trace, has_uart, gpio_stim_en, expect_x14_en, prev_pwm0, prev_pwm1;
 reg [31:0] expect_x14;
 reg [8*256-1:0] hex_file, trace_file, uart_file;
 
@@ -137,24 +137,34 @@ task check_commit_lane(
     input [31:0]  c_pc,
     input [31:0]  c_instr,
     input         c_rd_we,
+    input         c_rd_is_fp,
     input [4:0]   c_rd_addr,
     input [31:0]  c_rd_wdata,
+    input [4:0]   c_fflags,
     input         c_mem_valid,
     input         c_mem_we,
     input [31:0]  c_mem_addr,
     input [3:0]   c_mem_wstrb,
     input [31:0]  c_mem_wdata
 );
-    integer rc, g_step, g_rd_we, g_rd_addr, g_mv, g_mw, g_hlt;
+    integer rc, g_step, g_rd_we, g_rd_addr, g_mv, g_mw, g_hlt, g_rd_fp, g_fflg;
     reg [31:0] g_pc, g_instr, g_rd_wdata, g_maddr, g_mwdata;
     reg [3:0]  g_mwstrb;
     begin
         if (has_trace) begin
-            rc = $fscanf(trace_fd, "%d %h %h %d %d %h %d %d %h %h %h %d\n",
-                         g_step, g_pc, g_instr, g_rd_we, g_rd_addr, g_rd_wdata,
-                         g_mv, g_mw, g_maddr, g_mwstrb, g_mwdata, g_hlt);
-            if (rc != 12) begin
-                $display("FAIL [single_soc]: Golden trace EOF early at commit %0d", commit_idx);
+            g_rd_fp = 0;
+            g_fflg  = 0;
+            if (has_fp_trace) begin
+                rc = $fscanf(trace_fd, "%d %h %h %d %d %h %d %d %h %h %h %d %d %h\n",
+                             g_step, g_pc, g_instr, g_rd_we, g_rd_addr, g_rd_wdata,
+                             g_mv, g_mw, g_maddr, g_mwstrb, g_mwdata, g_hlt, g_rd_fp, g_fflg);
+            end else begin
+                rc = $fscanf(trace_fd, "%d %h %h %d %d %h %d %d %h %h %h %d\n",
+                             g_step, g_pc, g_instr, g_rd_we, g_rd_addr, g_rd_wdata,
+                             g_mv, g_mw, g_maddr, g_mwstrb, g_mwdata, g_hlt);
+            end
+            if ((has_fp_trace && rc != 14) || (!has_fp_trace && rc != 12)) begin
+                $display("FAIL [single_soc]: Golden trace EOF early at commit %0d (rc=%0d)", commit_idx, rc);
                 cmp_errors = cmp_errors + 1;
             end else begin
                 if (c_pc !== g_pc || c_instr !== g_instr) begin
@@ -163,9 +173,16 @@ task check_commit_lane(
                     cmp_errors = cmp_errors + 1;
                 end
                 if (c_rd_we !== g_rd_we[0] ||
-                    (g_rd_we[0] && (c_rd_addr !== g_rd_addr[4:0] || c_rd_wdata !== g_rd_wdata))) begin
-                    $display("FAIL [single_soc]: commit %0d lane%0d RD pc=0x%08x exp=(we=%0d r%0d=0x%08x) got=(we=%0d r%0d=0x%08x)",
-                             commit_idx, lane, g_pc, g_rd_we, g_rd_addr, g_rd_wdata, c_rd_we, c_rd_addr, c_rd_wdata);
+                    (g_rd_we[0] && (c_rd_addr !== g_rd_addr[4:0] || c_rd_wdata !== g_rd_wdata)) ||
+                    (has_fp_trace && g_rd_we[0] && (c_rd_is_fp !== g_rd_fp[0]))) begin
+                    $display("FAIL [single_soc]: commit %0d lane%0d RD pc=0x%08x exp=(we=%0d fp=%0d r%0d=0x%08x) got=(we=%0d fp=%0d r%0d=0x%08x)",
+                             commit_idx, lane, g_pc, g_rd_we, g_rd_fp, g_rd_addr, g_rd_wdata,
+                             c_rd_we, c_rd_is_fp, c_rd_addr, c_rd_wdata);
+                    cmp_errors = cmp_errors + 1;
+                end
+                if (has_fp_trace && (c_fflags !== g_fflg[4:0])) begin
+                    $display("FAIL [single_soc]: commit %0d lane%0d FFLAGS pc=0x%08x ins=0x%08x exp=0x%02x got=0x%02x",
+                             commit_idx, lane, g_pc, g_instr, g_fflg[4:0], c_fflags);
                     cmp_errors = cmp_errors + 1;
                 end
                 if (c_mem_valid !== g_mv[0] ||
@@ -187,10 +204,10 @@ endtask
 always @(posedge clk) begin
     if (reset_n && !dut_halted) begin
         if (commit0_valid)
-            check_commit_lane(0, commit0_pc, commit0_instr, commit0_rd_we, commit0_rd_addr, commit0_rd_wdata,
+            check_commit_lane(0, commit0_pc, commit0_instr, commit0_rd_we, commit0_rd_is_fp, commit0_rd_addr, commit0_rd_wdata, commit0_fflags,
                               commit0_mem_valid, commit0_mem_we, commit0_mem_addr, commit0_mem_wstrb, commit0_mem_wdata);
         if (commit1_valid)
-            check_commit_lane(1, commit1_pc, commit1_instr, commit1_rd_we, commit1_rd_addr, commit1_rd_wdata,
+            check_commit_lane(1, commit1_pc, commit1_instr, commit1_rd_we, commit1_rd_is_fp, commit1_rd_addr, commit1_rd_wdata, commit1_fflags,
                               commit1_mem_valid, commit1_mem_we, commit1_mem_addr, commit1_mem_wstrb, commit1_mem_wdata);
 
         // Peripheral harness: UART console capture, PWM waveform monitor & GPIO stimulus
@@ -233,6 +250,7 @@ initial begin
     prev_pwm0      = 1'b0;
     prev_pwm1      = 1'b0;
     has_trace      = 1'b0;
+    has_fp_trace   = 1'b0;
     has_uart       = 1'b0;
     gpio_stim_en   = 1'b0;
     expect_x14_en  = 1'b0;
@@ -253,7 +271,15 @@ initial begin
     for (li = 4096; li < 16384; li = li + 1)
         u_dut.u_dram.mem[li] = 128'd0;
 
-    if ($value$plusargs("TRACE=%s", trace_file)) begin
+    if ($value$plusargs("FP_TRACE=%s", trace_file)) begin
+        trace_fd = $fopen(trace_file, "r");
+        if (trace_fd == 0) begin
+            $display("FAIL [tb_single_ooo2w_soc]: Cannot open FP_TRACE %0s", trace_file);
+            $fatal(1);
+        end
+        has_trace    = 1'b1;
+        has_fp_trace = 1'b1;
+    end else if ($value$plusargs("TRACE=%s", trace_file)) begin
         trace_fd = $fopen(trace_file, "r");
         if (trace_fd == 0) begin
             $display("FAIL [tb_single_ooo2w_soc]: Cannot open trace %0s", trace_file);

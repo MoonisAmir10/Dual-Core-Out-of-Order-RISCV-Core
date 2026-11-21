@@ -21,7 +21,7 @@ reg                 barrier_valid;
 reg  [TAG_W-1:0]    barrier_tag;
 
 reg                 disp_valid, disp_is_store;
-wire                disp_ready_load, disp_ready_store;
+wire                disp_ready_load, disp_ready_load2, disp_ready_store, disp_ready_store2;
 reg  [TAG_W-1:0]    disp_rob_tag;
 reg  [31:0]         disp_seq_id, disp_imm, disp_vj, disp_vk;
 reg  [1:0]          disp_mem_size;
@@ -71,17 +71,24 @@ lsq2w #(
     .squash_valid(squash_valid), .squash_tag(squash_tag), .rob_head(rob_head),
     .barrier_valid(barrier_valid), .barrier_tag(barrier_tag),
     .disp_valid(disp_valid), .disp_is_store(disp_is_store),
-    .disp_ready_load(disp_ready_load), .disp_ready_store(disp_ready_store),
+    .disp_ready_load(disp_ready_load), .disp_ready_load2(disp_ready_load2),
+    .disp_ready_store(disp_ready_store), .disp_ready_store2(disp_ready_store2),
     .disp_rob_tag(disp_rob_tag), .disp_seq_id(disp_seq_id),
     .disp_mem_size(disp_mem_size), .disp_mem_unsigned(disp_mem_unsigned),
     .disp_imm(disp_imm), .disp_vj(disp_vj), .disp_qj(disp_qj), .disp_qj_valid(disp_qj_valid),
     .disp_vk(disp_vk), .disp_qk(disp_qk), .disp_qk_valid(disp_qk_valid),
+    .disp1_valid(1'b0), .disp1_is_store(1'b0),
+    .disp1_rob_tag(5'd0), .disp1_seq_id(32'd0),
+    .disp1_mem_size(2'd0), .disp1_mem_unsigned(1'b0),
+    .disp1_imm(32'd0), .disp1_vj(32'd0), .disp1_qj(5'd0), .disp1_qj_valid(1'b0),
+    .disp1_vk(32'd0), .disp1_qk(5'd0), .disp1_qk_valid(1'b0),
     .amo_req_valid(amo_req_valid), .amo_req_op(amo_req_op),
     .amo_req_tag(amo_req_tag), .amo_req_seq(amo_req_seq),
     .amo_req_addr(amo_req_addr), .amo_req_rs2(amo_req_rs2),
     .dc_writes_idle(dc_writes_idle),
     .cdb0_valid(1'b0), .cdb0_tag(5'd0), .cdb0_val(32'd0),
     .cdb1_valid(1'b0), .cdb1_tag(5'd0), .cdb1_val(32'd0),
+    .cdb2_valid(1'b0), .cdb2_tag(5'd0), .cdb2_val(32'd0),
     .wk0_valid(1'b0), .wk0_tag(5'd0), .wk1_valid(1'b0), .wk1_tag(5'd0),
     .byp_alu0_val(32'd0), .byp_alu1_val(32'd0),
     .rob_commit_store(rob_commit_store),

@@ -28,41 +28,49 @@ reg         irq_msip, irq_mtip, irq_meip;
 reg         trap_enter, trap_is_irq, mret_exec;
 reg  [3:0]  trap_cause;
 reg  [31:0] trap_pc, trap_tval;
+reg         fp_dirty_f;
+reg  [4:0]  fp_fflags_f;
 
 wire [31:0] rdata0, mtvec0, mepc0;
-wire        aill0, ill0, irqp0;
+wire        aill0, ill0, cs0, irqp0;
 wire [3:0]  irqc0;
 wire [1:0]  fs0;
+wire [2:0]  frm0;
+wire [4:0]  fflg0;
 wire [63:0] cyc0, ret0;
 
 wire [31:0] rdata_f, mtvec_f, mepc_f;
-wire        aill_f, ill_f, irqp_f;
+wire        aill_f, ill_f, cs_f, irqp_f;
 wire [3:0]  irqc_f;
 wire [1:0]  fs_f;
+wire [2:0]  frm_f;
+wire [4:0]  fflg_f;
 wire [63:0] cyc_f, ret_f;
 
 csr_unit #(.CORE_ID(32'd0), .MISA_EXT_F(1'b0)) u_dut (
     .clk(clk), .reset_n(reset_n), .halted(halted), .retire_cnt(retire_cnt),
+    .fp_commit_dirty(1'b0), .fp_commit_fflags(5'd0),
     .csr_req_valid(csr_req_valid), .csr_op(csr_op), .csr_addr(csr_addr),
     .csr_rs1_uimm(csr_rs1_uimm), .csr_rs1_val(csr_rs1_val),
-    .csr_rdata(rdata0), .csr_access_illegal(aill0), .csr_illegal(ill0),
+    .csr_rdata(rdata0), .csr_access_illegal(aill0), .csr_illegal(ill0), .csr_sync_required(cs0),
     .irq_msip(irq_msip), .irq_mtip(irq_mtip), .irq_meip(irq_meip),
     .trap_enter(trap_enter), .trap_is_irq(trap_is_irq), .trap_cause(trap_cause),
     .trap_pc(trap_pc), .trap_tval(trap_tval), .mret_exec(mret_exec),
     .mtvec_out(mtvec0), .mepc_out(mepc0), .irq_pending(irqp0), .irq_cause(irqc0),
-    .mstatus_fs_out(fs0), .mcycle_out(cyc0), .minstret_out(ret0)
+    .mstatus_fs_out(fs0), .frm_out(frm0), .fflags_out(fflg0), .mcycle_out(cyc0), .minstret_out(ret0)
 );
 
 csr_unit #(.CORE_ID(32'd1), .MISA_EXT_F(1'b1)) u_dut_f (
     .clk(clk), .reset_n(reset_n), .halted(halted), .retire_cnt(retire_cnt),
+    .fp_commit_dirty(fp_dirty_f), .fp_commit_fflags(fp_fflags_f),
     .csr_req_valid(csr_req_valid), .csr_op(csr_op), .csr_addr(csr_addr),
     .csr_rs1_uimm(csr_rs1_uimm), .csr_rs1_val(csr_rs1_val),
-    .csr_rdata(rdata_f), .csr_access_illegal(aill_f), .csr_illegal(ill_f),
+    .csr_rdata(rdata_f), .csr_access_illegal(aill_f), .csr_illegal(ill_f), .csr_sync_required(cs_f),
     .irq_msip(1'b0), .irq_mtip(1'b0), .irq_meip(1'b0),
     .trap_enter(1'b0), .trap_is_irq(1'b0), .trap_cause(4'd0),
     .trap_pc(32'd0), .trap_tval(32'd0), .mret_exec(1'b0),
     .mtvec_out(mtvec_f), .mepc_out(mepc_f), .irq_pending(irqp_f), .irq_cause(irqc_f),
-    .mstatus_fs_out(fs_f), .mcycle_out(cyc_f), .minstret_out(ret_f)
+    .mstatus_fs_out(fs_f), .frm_out(frm_f), .fflags_out(fflg_f), .mcycle_out(cyc_f), .minstret_out(ret_f)
 );
 
 initial clk = 1'b0;
@@ -134,6 +142,8 @@ initial begin
     trap_pc       = 32'd0;
     trap_tval     = 32'd0;
     mret_exec     = 1'b0;
+    fp_dirty_f    = 1'b0;
+    fp_fflags_f   = 5'd0;
 
     repeat (2) step_clk();
     reset_n = 1'b1;
@@ -229,6 +239,40 @@ initial begin
     csr_rs1_uimm  = 5'd1;
     #1;
     check(aill0 && !ill0, "csr_access_illegal=1 while csr_req_valid=0 (no CDB loop!)");
+
+    // 9. RV32F CSRs (fflags, frm, fcsr), commit-time fflags/FS=Dirty & mstatus.FS=Off legality
+    csr_req_valid = 1'b1; csr_op = CSR_OP_RS; csr_addr = CSR_FCSR; csr_rs1_uimm = 5'd0; #1;
+    check(aill0 && !aill_f && (rdata_f == 32'd0), "fcsr illegal on MISA_EXT_F=0, legal on F=1");
+    csr_req_valid = 1'b0;
+
+    // Write frm=3 (RUP) & fflags=0x15 via CSR_FCSR -> must set csr_sync_required & mstatus.FS=Dirty
+    csr_req_valid = 1'b1; csr_op = CSR_OP_RW; csr_addr = CSR_FCSR; csr_rs1_uimm = 5'd1; csr_rs1_val = 32'h0000_0075; #1;
+    check(cs_f && !aill_f, "fcsr write asserts csr_sync_required");
+    step_clk();
+    csr_req_valid = 1'b0; #1;
+    check((frm_f == 3'd3) && (fflg_f == 5'h15) && (fs_f == 2'b11), "fcsr write updates frm=3, fflags=0x15, FS=Dirty");
+
+    // Non-blocking commit-time sticky fflags accumulation + mstatus.FS=Dirty
+    csr_write(CSR_MSTATUS, 32'h0000_2000); // set FS=01 (Initial)
+    #1;
+    check(fs_f == 2'b01, "mstatus write sets FS=01");
+    fp_dirty_f  = 1'b1;
+    fp_fflags_f = 5'b01010; // DZ | UF -> ORs with 5'h15 => 5'h1F!
+    step_clk();
+    fp_dirty_f  = 1'b0;
+    fp_fflags_f = 5'd0;
+    #1;
+    check((fflg_f == 5'h1F) && (fs_f == 2'b11), "commit-time fflags OR sticky & sets FS=Dirty");
+
+    // Setting mstatus.FS=00 makes fflags/frm/fcsr illegal on MISA_EXT_F=1!
+    csr_write(CSR_MSTATUS, 32'h0000_0000);
+    csr_req_valid = 1'b1; csr_op = CSR_OP_RS; csr_addr = CSR_FFLAGS; csr_rs1_uimm = 5'd0; #1;
+    check(aill_f, "fflags illegal when mstatus.FS==00");
+    csr_addr = CSR_FRM; #1;
+    check(aill_f, "frm illegal when mstatus.FS==00");
+    csr_addr = CSR_FCSR; #1;
+    check(aill_f, "fcsr illegal when mstatus.FS==00");
+    csr_req_valid = 1'b0;
 
     if (errors == 0)
         $display("PASS [tb_csr_traps]: %0d/%0d M-mode trap/interrupt CSR checks passed!", checks, checks);

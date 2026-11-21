@@ -51,6 +51,43 @@
     sw      a0,  72(sp)
     sw      a2,  76(sp)
     mv      a3, sp
+#ifdef __riscv_flen
+    /* Lazy FP caller-saved context save (only when mstatus.FS == Dirty 2'b11).
+     * Keeps a3 pointing at the 80-byte trap_frame_t and preserves 16B sp alignment! */
+    li      t1, 0x6000
+    and     t2, t0, t1
+    bne     t2, t1, 1f
+    addi    sp, sp, -96
+    addi    t2, zero, 1
+    sw      t2,   0(sp)
+    frcsr   t1
+    sw      t1,   4(sp)
+    fsw     ft0,  8(sp)
+    fsw     ft1, 12(sp)
+    fsw     ft2, 16(sp)
+    fsw     ft3, 20(sp)
+    fsw     ft4, 24(sp)
+    fsw     ft5, 28(sp)
+    fsw     ft6, 32(sp)
+    fsw     ft7, 36(sp)
+    fsw     ft8, 40(sp)
+    fsw     ft9, 44(sp)
+    fsw     ft10, 48(sp)
+    fsw     ft11, 52(sp)
+    fsw     fa0, 56(sp)
+    fsw     fa1, 60(sp)
+    fsw     fa2, 64(sp)
+    fsw     fa3, 68(sp)
+    fsw     fa4, 72(sp)
+    fsw     fa5, 76(sp)
+    fsw     fa6, 80(sp)
+    fsw     fa7, 84(sp)
+    j       2f
+1:
+    addi    sp, sp, -16
+    sw      zero, 0(sp)
+2:
+#endif
 .endm
 
 /* ----------------------------------------------------------------------------
@@ -116,6 +153,37 @@ _trap_vec_mei:
  * Shared Epilogue: Write Back Potentially Updated mepc, Restore 16 GPRs & MRET
  * ---------------------------------------------------------------------------- */
 _trap_restore_and_mret:
+#ifdef __riscv_flen
+    lw      t0,   0(sp)
+    beqz    t0,   1f
+    flw     ft0,  8(sp)
+    flw     ft1, 12(sp)
+    flw     ft2, 16(sp)
+    flw     ft3, 20(sp)
+    flw     ft4, 24(sp)
+    flw     ft5, 28(sp)
+    flw     ft6, 32(sp)
+    flw     ft7, 36(sp)
+    flw     ft8, 40(sp)
+    flw     ft9, 44(sp)
+    flw     ft10, 48(sp)
+    flw     ft11, 52(sp)
+    flw     fa0, 56(sp)
+    flw     fa1, 60(sp)
+    flw     fa2, 64(sp)
+    flw     fa3, 68(sp)
+    flw     fa4, 72(sp)
+    flw     fa5, 76(sp)
+    flw     fa6, 80(sp)
+    flw     fa7, 84(sp)
+    lw      t1,   4(sp)
+    fscsr   t1
+    addi    sp, sp, 96
+    j       2f
+1:
+    addi    sp, sp, 16
+2:
+#endif
     lw      t0,  64(sp)
     csrw    mepc, t0
 

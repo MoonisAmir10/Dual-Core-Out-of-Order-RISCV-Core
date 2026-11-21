@@ -25,11 +25,13 @@ module lsq2w #(
     input  wire                 barrier_valid,
     input  wire [TAG_W-1:0]     barrier_tag,
 
-    // Single memory dispatch port
+    // 2-Wide memory dispatch ports (Lane 0 older, Lane 1 younger; supports LD+LD, ST+ST, LD+ST, ST+LD!)
     input  wire                 disp_valid,
     input  wire                 disp_is_store,
     output wire                 disp_ready_load,
+    output wire                 disp_ready_load2,
     output wire                 disp_ready_store,
+    output wire                 disp_ready_store2,
     input  wire [TAG_W-1:0]     disp_rob_tag,
     input  wire [31:0]          disp_seq_id,
     input  wire [1:0]           disp_mem_size,
@@ -42,6 +44,20 @@ module lsq2w #(
     input  wire [TAG_W-1:0]     disp_qk,
     input  wire                 disp_qk_valid,
 
+    input  wire                 disp1_valid,
+    input  wire                 disp1_is_store,
+    input  wire [TAG_W-1:0]     disp1_rob_tag,
+    input  wire [31:0]          disp1_seq_id,
+    input  wire [1:0]           disp1_mem_size,
+    input  wire                 disp1_mem_unsigned,
+    input  wire [31:0]          disp1_imm,
+    input  wire [31:0]          disp1_vj,
+    input  wire [TAG_W-1:0]     disp1_qj,
+    input  wire                 disp1_qj_valid,
+    input  wire [31:0]          disp1_vk,
+    input  wire [TAG_W-1:0]     disp1_qk,
+    input  wire                 disp1_qk_valid,
+
     // ROB-Head Non-Speculative RV32A Atomic Request (LR.W / SC.W / AMO*.W)
     input  wire                 amo_req_valid,
     input  wire [3:0]           amo_req_op,
@@ -51,13 +67,16 @@ module lsq2w #(
     input  wire [31:0]          amo_req_rs2,
     input  wire                 dc_writes_idle,
 
-    // Dual-CDB wakeup snoop
+    // Triple-CDB wakeup snoop (INT CDB0, INT CDB1, Dedicated FP CDB2 for FSW & FP->INT!)
     input  wire                 cdb0_valid,
     input  wire [TAG_W-1:0]     cdb0_tag,
     input  wire [31:0]          cdb0_val,
     input  wire                 cdb1_valid,
     input  wire [TAG_W-1:0]     cdb1_tag,
     input  wire [31:0]          cdb1_val,
+    input  wire                 cdb2_valid,
+    input  wire [TAG_W-1:0]     cdb2_tag,
+    input  wire [31:0]          cdb2_val,
 
     // 1-Cycle Speculative Issue-Stage Tag Wakeup + Registered EX->EX Bypass Data
     input  wire                 wk0_valid,
@@ -326,17 +345,25 @@ always @(*) begin
     end
 end
 
-reg                lq_has_free;
-reg [LQ_IDX_W-1:0] lq_free_idx;
+reg                lq_has_free, lq_has_free2;
+reg [LQ_IDX_W-1:0] lq_free_idx, lq_free_idx2;
 integer fi;
 always @(*) begin
-    fi          = 0;
-    lq_has_free = 1'b0;
-    lq_free_idx = 3'd0;
+    fi           = 0;
+    lq_has_free  = 1'b0;
+    lq_free_idx  = 3'd0;
     for (fi = LQ_DEPTH - 1; fi >= 0; fi = fi - 1) begin
         if (!lq_valid[fi]) begin
             lq_has_free = 1'b1;
             lq_free_idx = fi[LQ_IDX_W-1:0];
+        end
+    end
+    lq_has_free2 = 1'b0;
+    lq_free_idx2 = 3'd0;
+    for (fi = LQ_DEPTH - 1; fi >= 0; fi = fi - 1) begin
+        if (!lq_valid[fi] && (!lq_has_free || (fi[LQ_IDX_W-1:0] != lq_free_idx))) begin
+            lq_has_free2 = 1'b1;
+            lq_free_idx2 = fi[LQ_IDX_W-1:0];
         end
     end
 end
@@ -345,30 +372,58 @@ wire [TAG_W-1:0] sq_br_age   = squash_tag - rob_head;
 wire [TAG_W-1:0] bar_age     = barrier_tag - rob_head;
 wire [TAG_W-1:0] rob_head1   = rob_head + {{(TAG_W-1){1'b0}}, 1'b1};
 
-assign disp_ready_load  = !flush && !squash_valid && lq_has_free;
-assign disp_ready_store = !flush && !squash_valid && !sq_full;
+assign disp_ready_load   = !flush && !squash_valid && lq_has_free;
+assign disp_ready_load2  = !flush && !squash_valid && lq_has_free && lq_has_free2;
+assign disp_ready_store  = !flush && !squash_valid && !sq_full;
+assign disp_ready_store2 = !flush && !squash_valid && (sq_occ <= 4'd6);
 
-// Same-cycle Dual-CDB & Early Issue-Wakeup check on incoming dispatch operands
+// Same-cycle Triple-CDB & Early Issue-Wakeup check on incoming Lane 0 & Lane 1 dispatch operands
 wire        dj_c0      = disp_qj_valid && cdb0_valid && (disp_qj == cdb0_tag);
 wire        dj_c1      = disp_qj_valid && !dj_c0 && cdb1_valid && (disp_qj == cdb1_tag);
-wire        dj_w0      = disp_qj_valid && !dj_c0 && !dj_c1 && wk0_valid && (disp_qj == wk0_tag);
-wire        dj_w1      = disp_qj_valid && !dj_c0 && !dj_c1 && !dj_w0 && wk1_valid && (disp_qj == wk1_tag);
-wire [31:0] disp_vj_eff   = dj_c0 ? cdb0_val : (dj_c1 ? cdb1_val : disp_vj);
-wire        disp_qj_v_eff = (dj_c0 || dj_c1 || dj_w0 || dj_w1) ? 1'b0 : disp_qj_valid;
+wire        dj_c2      = disp_qj_valid && !dj_c0 && !dj_c1 && cdb2_valid && (disp_qj == cdb2_tag);
+wire        dj_w0      = disp_qj_valid && !dj_c0 && !dj_c1 && !dj_c2 && wk0_valid && (disp_qj == wk0_tag);
+wire        dj_w1      = disp_qj_valid && !dj_c0 && !dj_c1 && !dj_c2 && !dj_w0 && wk1_valid && (disp_qj == wk1_tag);
+wire [31:0] disp_vj_eff   = dj_c0 ? cdb0_val : (dj_c1 ? cdb1_val : (dj_c2 ? cdb2_val : disp_vj));
+wire        disp_qj_v_eff = (dj_c0 || dj_c1 || dj_c2 || dj_w0 || dj_w1) ? 1'b0 : disp_qj_valid;
 wire [1:0]  disp_qjbyp_e  = dj_w0 ? BYP_ALU0 : (dj_w1 ? BYP_ALU1 : BYP_NONE);
 
 wire        dk_c0      = disp_qk_valid && cdb0_valid && (disp_qk == cdb0_tag);
 wire        dk_c1      = disp_qk_valid && !dk_c0 && cdb1_valid && (disp_qk == cdb1_tag);
-wire        dk_w0      = disp_qk_valid && !dk_c0 && !dk_c1 && wk0_valid && (disp_qk == wk0_tag);
-wire        dk_w1      = disp_qk_valid && !dk_c0 && !dk_c1 && !dk_w0 && wk1_valid && (disp_qk == wk1_tag);
-wire [31:0] disp_vk_eff   = dk_c0 ? cdb0_val : (dk_c1 ? cdb1_val : disp_vk);
-wire        disp_qk_v_eff = (dk_c0 || dk_c1 || dk_w0 || dk_w1) ? 1'b0 : disp_qk_valid;
+wire        dk_c2      = disp_qk_valid && !dk_c0 && !dk_c1 && cdb2_valid && (disp_qk == cdb2_tag);
+wire        dk_w0      = disp_qk_valid && !dk_c0 && !dk_c1 && !dk_c2 && wk0_valid && (disp_qk == wk0_tag);
+wire        dk_w1      = disp_qk_valid && !dk_c0 && !dk_c1 && !dk_c2 && !dk_w0 && wk1_valid && (disp_qk == wk1_tag);
+wire [31:0] disp_vk_eff   = dk_c0 ? cdb0_val : (dk_c1 ? cdb1_val : (dk_c2 ? cdb2_val : disp_vk));
+wire        disp_qk_v_eff = (dk_c0 || dk_c1 || dk_c2 || dk_w0 || dk_w1) ? 1'b0 : disp_qk_valid;
 wire [1:0]  disp_qkbyp_e  = dk_w0 ? BYP_ALU0 : (dk_w1 ? BYP_ALU1 : BYP_NONE);
 
 wire [31:0] disp_addr_eff = disp_vj_eff + disp_imm;
 
-wire do_disp_load  = disp_valid && !disp_is_store && disp_ready_load;
-wire do_disp_store = disp_valid &&  disp_is_store && disp_ready_store;
+wire        d1j_c0      = disp1_qj_valid && cdb0_valid && (disp1_qj == cdb0_tag);
+wire        d1j_c1      = disp1_qj_valid && !d1j_c0 && cdb1_valid && (disp1_qj == cdb1_tag);
+wire        d1j_c2      = disp1_qj_valid && !d1j_c0 && !d1j_c1 && cdb2_valid && (disp1_qj == cdb2_tag);
+wire        d1j_w0      = disp1_qj_valid && !d1j_c0 && !d1j_c1 && !d1j_c2 && wk0_valid && (disp1_qj == wk0_tag);
+wire        d1j_w1      = disp1_qj_valid && !d1j_c0 && !d1j_c1 && !d1j_c2 && !d1j_w0 && wk1_valid && (disp1_qj == wk1_tag);
+wire [31:0] disp1_vj_eff   = d1j_c0 ? cdb0_val : (d1j_c1 ? cdb1_val : (d1j_c2 ? cdb2_val : disp1_vj));
+wire        disp1_qj_v_eff = (d1j_c0 || d1j_c1 || d1j_c2 || d1j_w0 || d1j_w1) ? 1'b0 : disp1_qj_valid;
+wire [1:0]  disp1_qjbyp_e  = d1j_w0 ? BYP_ALU0 : (d1j_w1 ? BYP_ALU1 : BYP_NONE);
+
+wire        d1k_c0      = disp1_qk_valid && cdb0_valid && (disp1_qk == cdb0_tag);
+wire        d1k_c1      = disp1_qk_valid && !d1k_c0 && cdb1_valid && (disp1_qk == cdb1_tag);
+wire        d1k_c2      = disp1_qk_valid && !d1k_c0 && !d1k_c1 && cdb2_valid && (disp1_qk == cdb2_tag);
+wire        d1k_w0      = disp1_qk_valid && !d1k_c0 && !d1k_c1 && !d1k_c2 && wk0_valid && (disp1_qk == wk0_tag);
+wire        d1k_w1      = disp1_qk_valid && !d1k_c0 && !d1k_c1 && !d1k_c2 && !d1k_w0 && wk1_valid && (disp1_qk == wk1_tag);
+wire [31:0] disp1_vk_eff   = d1k_c0 ? cdb0_val : (d1k_c1 ? cdb1_val : (d1k_c2 ? cdb2_val : disp1_vk));
+wire        disp1_qk_v_eff = (d1k_c0 || d1k_c1 || d1k_c2 || d1k_w0 || d1k_w1) ? 1'b0 : disp1_qk_valid;
+wire [1:0]  disp1_qkbyp_e  = d1k_w0 ? BYP_ALU0 : (d1k_w1 ? BYP_ALU1 : BYP_NONE);
+
+wire [31:0] disp1_addr_eff = disp1_vj_eff + disp1_imm;
+
+wire do_disp0_load  = disp_valid  && !disp_is_store  && disp_ready_load;
+wire do_disp0_store = disp_valid  &&  disp_is_store  && disp_ready_store;
+wire do_disp1_load  = disp1_valid && !disp1_is_store && (do_disp0_load  ? disp_ready_load2  : disp_ready_load);
+wire do_disp1_store = disp1_valid &&  disp1_is_store && (do_disp0_store ? disp_ready_store2 : disp_ready_store);
+wire [LQ_IDX_W-1:0] lq_disp1_idx = do_disp0_load ? lq_free_idx2 : lq_free_idx;
+wire [SQ_IDX_W-1:0] sq_disp1_idx = do_disp0_store ? (sq_tail[2:0] + 3'd1) : sq_tail[2:0];
 
 // Combinational misaligned-load detector (evaluated on live bypassed lq_addr_eff)
 reg [LQ_DEPTH-1:0] lq_is_misalign;
@@ -955,6 +1010,11 @@ always @(posedge clk or negedge reset_n) begin
                             lq_addr_valid[k] <= 1'b1;
                             lq_qj_valid[k]   <= 1'b0;
                             lq_qj_byp[k]     <= BYP_NONE;
+                        end else if (cdb2_valid && (lq_qj[k] == cdb2_tag)) begin
+                            lq_addr[k]       <= cdb2_val + lq_imm[k];
+                            lq_addr_valid[k] <= 1'b1;
+                            lq_qj_valid[k]   <= 1'b0;
+                            lq_qj_byp[k]     <= BYP_NONE;
                         end else if (wk0_valid && (lq_qj[k] == wk0_tag)) begin
                             lq_addr_valid[k] <= 1'b1;
                             lq_qj_valid[k]   <= 1'b0;
@@ -982,6 +1042,11 @@ always @(posedge clk or negedge reset_n) begin
                         sq_addr_valid[k] <= 1'b1;
                         sq_qj_valid[k]   <= 1'b0;
                         sq_qj_byp[k]     <= BYP_NONE;
+                    end else if (cdb2_valid && (sq_qj[k] == cdb2_tag)) begin
+                        sq_addr[k]       <= cdb2_val + sq_imm[k];
+                        sq_addr_valid[k] <= 1'b1;
+                        sq_qj_valid[k]   <= 1'b0;
+                        sq_qj_byp[k]     <= BYP_NONE;
                     end else if (wk0_valid && (sq_qj[k] == wk0_tag)) begin
                         sq_addr_valid[k] <= 1'b1;
                         sq_qj_valid[k]   <= 1'b0;
@@ -1003,6 +1068,10 @@ always @(posedge clk or negedge reset_n) begin
                         sq_qk_byp[k]   <= BYP_NONE;
                     end else if (cdb1_valid && (sq_qk[k] == cdb1_tag)) begin
                         sq_vk[k]       <= cdb1_val;
+                        sq_qk_valid[k] <= 1'b0;
+                        sq_qk_byp[k]   <= BYP_NONE;
+                    end else if (cdb2_valid && (sq_qk[k] == cdb2_tag)) begin
+                        sq_vk[k]       <= cdb2_val;
                         sq_qk_valid[k] <= 1'b0;
                         sq_qk_byp[k]   <= BYP_NONE;
                     end else if (wk0_valid && (sq_qk[k] == wk0_tag)) begin
@@ -1069,7 +1138,7 @@ always @(posedge clk or negedge reset_n) begin
                 end
             end
 
-            // 5. Selective branch squash OR single memory dispatch
+            // 5. Selective branch squash OR 2-wide memory dispatch (LD+LD, ST+ST, LD+ST, ST+LD!)
             if (squash_valid) begin
                 sq_tail <= sq_commit_ptr + sq_survive_cnt;
                 for (k = 0; k < LQ_DEPTH; k = k + 1) begin
@@ -1084,43 +1153,85 @@ always @(posedge clk or negedge reset_n) begin
                         lq_gen[k]      <= lq_gen[k] + 3'd1;
                     end
                 end
-            end else if (do_disp_load) begin
-                lq_valid[lq_free_idx]      <= 1'b1;
-                lq_rob_tag[lq_free_idx]    <= disp_rob_tag;
-                lq_seq_id[lq_free_idx]     <= disp_seq_id;
-                lq_size[lq_free_idx]       <= disp_mem_size;
-                lq_uns[lq_free_idx]        <= disp_mem_unsigned;
-                lq_imm[lq_free_idx]        <= disp_imm;
-                lq_qj[lq_free_idx]         <= disp_qj;
-                lq_qj_valid[lq_free_idx]   <= disp_qj_v_eff;
-                lq_qj_byp[lq_free_idx]     <= disp_qjbyp_e;
-                lq_addr[lq_free_idx]       <= disp_addr_eff;
-                lq_addr_valid[lq_free_idx] <= !disp_qj_v_eff;
-                lq_sq_snap[lq_free_idx]    <= sq_tail;
-                lq_issued[lq_free_idx]     <= 1'b0;
-                lq_done[lq_free_idx]       <= 1'b0;
-                lq_cdb_sent[lq_free_idx]   <= 1'b0;
-                lq_from_stlf[lq_free_idx]  <= 1'b0;
-                lq_replay[lq_free_idx]     <= 1'b0;
-                lq_exc[lq_free_idx]        <= 1'b0;
-                lq_data[lq_free_idx]       <= 32'd0;
-            end else if (do_disp_store) begin
-                sq_rob_tag[sq_tail_idx]    <= disp_rob_tag;
-                sq_seq_id[sq_tail_idx]     <= disp_seq_id;
-                sq_size[sq_tail_idx]       <= disp_mem_size;
-                sq_imm[sq_tail_idx]        <= disp_imm;
-                sq_qj[sq_tail_idx]         <= disp_qj;
-                sq_qj_valid[sq_tail_idx]   <= disp_qj_v_eff;
-                sq_qj_byp[sq_tail_idx]     <= disp_qjbyp_e;
-                sq_addr[sq_tail_idx]       <= disp_addr_eff;
-                sq_addr_valid[sq_tail_idx] <= !disp_qj_v_eff;
-                sq_vk[sq_tail_idx]         <= disp_vk_eff;
-                sq_qk[sq_tail_idx]         <= disp_qk;
-                sq_qk_valid[sq_tail_idx]   <= disp_qk_v_eff;
-                sq_qk_byp[sq_tail_idx]     <= disp_qkbyp_e;
-                sq_cdb_sent[sq_tail_idx]   <= 1'b0;
-                sq_mmio_sent[sq_tail_idx]  <= 1'b0;
-                sq_tail                    <= sq_tail + 4'd1;
+            end else begin
+                if (do_disp0_load) begin
+                    lq_valid[lq_free_idx]      <= 1'b1;
+                    lq_rob_tag[lq_free_idx]    <= disp_rob_tag;
+                    lq_seq_id[lq_free_idx]     <= disp_seq_id;
+                    lq_size[lq_free_idx]       <= disp_mem_size;
+                    lq_uns[lq_free_idx]        <= disp_mem_unsigned;
+                    lq_imm[lq_free_idx]        <= disp_imm;
+                    lq_qj[lq_free_idx]         <= disp_qj;
+                    lq_qj_valid[lq_free_idx]   <= disp_qj_v_eff;
+                    lq_qj_byp[lq_free_idx]     <= disp_qjbyp_e;
+                    lq_addr[lq_free_idx]       <= disp_addr_eff;
+                    lq_addr_valid[lq_free_idx] <= !disp_qj_v_eff;
+                    lq_sq_snap[lq_free_idx]    <= sq_tail;
+                    lq_issued[lq_free_idx]     <= 1'b0;
+                    lq_done[lq_free_idx]       <= 1'b0;
+                    lq_cdb_sent[lq_free_idx]   <= 1'b0;
+                    lq_from_stlf[lq_free_idx]  <= 1'b0;
+                    lq_replay[lq_free_idx]     <= 1'b0;
+                    lq_exc[lq_free_idx]        <= 1'b0;
+                    lq_data[lq_free_idx]       <= 32'd0;
+                end
+                if (do_disp1_load) begin
+                    lq_valid[lq_disp1_idx]      <= 1'b1;
+                    lq_rob_tag[lq_disp1_idx]    <= disp1_rob_tag;
+                    lq_seq_id[lq_disp1_idx]     <= disp1_seq_id;
+                    lq_size[lq_disp1_idx]       <= disp1_mem_size;
+                    lq_uns[lq_disp1_idx]        <= disp1_mem_unsigned;
+                    lq_imm[lq_disp1_idx]        <= disp1_imm;
+                    lq_qj[lq_disp1_idx]         <= disp1_qj;
+                    lq_qj_valid[lq_disp1_idx]   <= disp1_qj_v_eff;
+                    lq_qj_byp[lq_disp1_idx]     <= disp1_qjbyp_e;
+                    lq_addr[lq_disp1_idx]       <= disp1_addr_eff;
+                    lq_addr_valid[lq_disp1_idx] <= !disp1_qj_v_eff;
+                    lq_sq_snap[lq_disp1_idx]    <= do_disp0_store ? (sq_tail + 4'd1) : sq_tail;
+                    lq_issued[lq_disp1_idx]     <= 1'b0;
+                    lq_done[lq_disp1_idx]       <= 1'b0;
+                    lq_cdb_sent[lq_disp1_idx]   <= 1'b0;
+                    lq_from_stlf[lq_disp1_idx]  <= 1'b0;
+                    lq_replay[lq_disp1_idx]     <= 1'b0;
+                    lq_exc[lq_disp1_idx]        <= 1'b0;
+                    lq_data[lq_disp1_idx]       <= 32'd0;
+                end
+                if (do_disp0_store) begin
+                    sq_rob_tag[sq_tail_idx]    <= disp_rob_tag;
+                    sq_seq_id[sq_tail_idx]     <= disp_seq_id;
+                    sq_size[sq_tail_idx]       <= disp_mem_size;
+                    sq_imm[sq_tail_idx]        <= disp_imm;
+                    sq_qj[sq_tail_idx]         <= disp_qj;
+                    sq_qj_valid[sq_tail_idx]   <= disp_qj_v_eff;
+                    sq_qj_byp[sq_tail_idx]     <= disp_qjbyp_e;
+                    sq_addr[sq_tail_idx]       <= disp_addr_eff;
+                    sq_addr_valid[sq_tail_idx] <= !disp_qj_v_eff;
+                    sq_vk[sq_tail_idx]         <= disp_vk_eff;
+                    sq_qk[sq_tail_idx]         <= disp_qk;
+                    sq_qk_valid[sq_tail_idx]   <= disp_qk_v_eff;
+                    sq_qk_byp[sq_tail_idx]     <= disp_qkbyp_e;
+                    sq_cdb_sent[sq_tail_idx]   <= 1'b0;
+                    sq_mmio_sent[sq_tail_idx]  <= 1'b0;
+                end
+                if (do_disp1_store) begin
+                    sq_rob_tag[sq_disp1_idx]    <= disp1_rob_tag;
+                    sq_seq_id[sq_disp1_idx]     <= disp1_seq_id;
+                    sq_size[sq_disp1_idx]       <= disp1_mem_size;
+                    sq_imm[sq_disp1_idx]        <= disp1_imm;
+                    sq_qj[sq_disp1_idx]         <= disp1_qj;
+                    sq_qj_valid[sq_disp1_idx]   <= disp1_qj_v_eff;
+                    sq_qj_byp[sq_disp1_idx]     <= disp1_qjbyp_e;
+                    sq_addr[sq_disp1_idx]       <= disp1_addr_eff;
+                    sq_addr_valid[sq_disp1_idx] <= !disp1_qj_v_eff;
+                    sq_vk[sq_disp1_idx]         <= disp1_vk_eff;
+                    sq_qk[sq_disp1_idx]         <= disp1_qk;
+                    sq_qk_valid[sq_disp1_idx]   <= disp1_qk_v_eff;
+                    sq_qk_byp[sq_disp1_idx]     <= disp1_qkbyp_e;
+                    sq_cdb_sent[sq_disp1_idx]   <= 1'b0;
+                    sq_mmio_sent[sq_disp1_idx]  <= 1'b0;
+                end
+                if (do_disp0_store || do_disp1_store)
+                    sq_tail <= sq_tail + {3'd0, do_disp0_store} + {3'd0, do_disp1_store};
             end
         end
     end

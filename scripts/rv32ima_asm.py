@@ -24,6 +24,11 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+_SCRIPT_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+import ieee754_oracle as fpo  # noqa: E402
+
 
 # ---------------------------------------------------------------------------
 # Bit Helpers & Register / CSR Maps
@@ -56,7 +61,26 @@ ABI_REGS: Dict[str, int] = {
 for _i in range(32):
     ABI_REGS[f"x{_i}"] = _i
 
+FP_ABI_REGS: Dict[str, int] = {
+    "ft0": 0, "ft1": 1, "ft2": 2, "ft3": 3, "ft4": 4, "ft5": 5, "ft6": 6, "ft7": 7,
+    "fs0": 8, "fs1": 9,
+    "fa0": 10, "fa1": 11, "fa2": 12, "fa3": 13, "fa4": 14, "fa5": 15, "fa6": 16, "fa7": 17,
+    "fs2": 18, "fs3": 19, "fs4": 20, "fs5": 21, "fs6": 22, "fs7": 23,
+    "fs8": 24, "fs9": 25, "fs10": 26, "fs11": 27,
+    "ft8": 28, "ft9": 29, "ft10": 30, "ft11": 31,
+}
+for _i in range(32):
+    FP_ABI_REGS[f"f{_i}"] = _i
+
+FP_RM_MAP: Dict[str, int] = {
+    "rne": 0, "rtz": 1, "rdn": 2, "rup": 3, "rmm": 4, "dyn": 7,
+}
+FP_RM_REV: Dict[int, str] = {v: k for k, v in FP_RM_MAP.items()}
+
 CSR_NAMES: Dict[str, int] = {
+    "fflags":    0x001,
+    "frm":       0x002,
+    "fcsr":      0x003,
     "mstatus":   0x300,
     "misa":      0x301,
     "mie":       0x304,
@@ -87,6 +111,23 @@ def parse_reg(tok: str) -> int:
     if key not in ABI_REGS:
         raise ValueError(f"Unknown register: '{tok}'")
     return ABI_REGS[key]
+
+
+def parse_freg(tok: str) -> int:
+    key = tok.strip().lower()
+    if key not in FP_ABI_REGS:
+        raise ValueError(f"Unknown FP register: '{tok}'")
+    return FP_ABI_REGS[key]
+
+
+def parse_rm(tok: str) -> int:
+    key = tok.strip().lower()
+    if key in FP_RM_MAP:
+        return FP_RM_MAP[key]
+    v = parse_int(tok)
+    if not (0 <= v <= 7):
+        raise ValueError(f"Rounding mode out of range: '{tok}'")
+    return v
 
 
 def parse_int(tok: str) -> int:
@@ -206,6 +247,46 @@ def enc_j(offset: int, rd: int, opcode: int = 0x6F) -> int:
 def enc_amo(funct5: int, aq: int, rl: int, rs2: int, rs1: int, rd: int) -> int:
     f7 = ((funct5 & 0x1F) << 2) | ((aq & 1) << 1) | (rl & 1)
     return enc_r(f7, rs2, rs1, 0x2, rd, opcode=0x2F)
+
+
+def enc_r4(rs3: int, fmt: int, rs2: int, rs1: int, rm: int, rd: int, opcode: int) -> int:
+    return (
+        ((rs3 & 0x1F) << 27)
+        | ((fmt & 0x3) << 25)
+        | ((rs2 & 0x1F) << 20)
+        | ((rs1 & 0x1F) << 15)
+        | ((rm & 0x7) << 12)
+        | ((rd & 0x1F) << 7)
+        | (opcode & 0x7F)
+    )
+
+
+FP_R4_OPS: Dict[str, int] = {
+    "fmadd.s":  0x43,
+    "fmsub.s":  0x47,
+    "fnmsub.s": 0x4B,
+    "fnmadd.s": 0x4F,
+}
+FP_BIN_RM_OPS: Dict[str, int] = {
+    "fadd.s": 0x00,
+    "fsub.s": 0x04,
+    "fmul.s": 0x08,
+    "fdiv.s": 0x0C,
+}
+FP_SGNJ_OPS: Dict[str, int] = {
+    "fsgnj.s":  0x0,
+    "fsgnjn.s": 0x1,
+    "fsgnjx.s": 0x2,
+}
+FP_MINMAX_OPS: Dict[str, int] = {
+    "fmin.s": 0x0,
+    "fmax.s": 0x1,
+}
+FP_CMP_OPS: Dict[str, int] = {
+    "fle.s": 0x0,
+    "flt.s": 0x1,
+    "feq.s": 0x2,
+}
 
 
 R_OPS: Dict[str, Tuple[int, int]] = {
@@ -372,6 +453,28 @@ def _expand_pseudo(mnem: str, ops: List[str]) -> List[Tuple[str, List[str]]]:
         return [("csrrs", [ops[0], "cycle", "x0"])]
     if mnem == "rdinstret":
         return [("csrrs", [ops[0], "instret", "x0"])]
+    if mnem == "fmv.s":
+        return [("fsgnj.s", [ops[0], ops[1], ops[1]])]
+    if mnem == "fabs.s":
+        return [("fsgnjx.s", [ops[0], ops[1], ops[1]])]
+    if mnem == "fneg.s":
+        return [("fsgnjn.s", [ops[0], ops[1], ops[1]])]
+    if mnem == "frcsr":
+        return [("csrrs", [ops[0], "fcsr", "x0"])]
+    if mnem == "fscsr":
+        return [("csrrw", [ops[0], "fcsr", ops[1]])] if len(ops) == 2 else [("csrrw", ["x0", "fcsr", ops[0]])]
+    if mnem == "frrm":
+        return [("csrrs", [ops[0], "frm", "x0"])]
+    if mnem == "fsrm":
+        return [("csrrw", [ops[0], "frm", ops[1]])] if len(ops) == 2 else [("csrrw", ["x0", "frm", ops[0]])]
+    if mnem == "fsrmi":
+        return [("csrrwi", [ops[0], "frm", ops[1]])] if len(ops) == 2 else [("csrrwi", ["x0", "frm", ops[0]])]
+    if mnem == "frflags":
+        return [("csrrs", [ops[0], "fflags", "x0"])]
+    if mnem == "fsflags":
+        return [("csrrw", [ops[0], "fflags", ops[1]])] if len(ops) == 2 else [("csrrw", ["x0", "fflags", ops[0]])]
+    if mnem == "fsflagsi":
+        return [("csrrwi", [ops[0], "fflags", ops[1]])] if len(ops) == 2 else [("csrrwi", ["x0", "fflags", ops[0]])]
     if mnem == "la":
         return [("la_hi", [ops[0], ops[1]]), ("la_lo", [ops[0], ops[1]])]
     if mnem == "li":
@@ -537,6 +640,63 @@ def assemble(source: str) -> List[int]:
             else:
                 rs1, off = parse_reg(ops[1]), parse_int(ops[2])
             words.append(enc_i(off, rs1, 0x0, rd, 0x67))
+        # --- RV32F Single-Precision Floating-Point Instructions (All 26 Ops) ---
+        elif mnem == "flw":
+            fd = parse_freg(ops[0])
+            m = MEM_ARG_RE.match(ops[1])
+            if m:
+                off = parse_int(m.group(1)) if m.group(1).strip() else 0
+                rs1 = parse_reg(m.group(2))
+            else:
+                rs1, off = parse_reg(ops[1]), parse_int(ops[2])
+            words.append(enc_i(off, rs1, 0x2, fd, 0x07))
+        elif mnem == "fsw":
+            fs2 = parse_freg(ops[0])
+            m = MEM_ARG_RE.match(ops[1])
+            if m:
+                off = parse_int(m.group(1)) if m.group(1).strip() else 0
+                rs1 = parse_reg(m.group(2))
+            else:
+                rs1, off = parse_reg(ops[1]), parse_int(ops[2])
+            words.append(enc_s(off, fs2, rs1, 0x2, opcode=0x27))
+        elif mnem in FP_R4_OPS:
+            fd, fs1, fs2, fs3 = parse_freg(ops[0]), parse_freg(ops[1]), parse_freg(ops[2]), parse_freg(ops[3])
+            rm = parse_rm(ops[4]) if len(ops) > 4 else 7
+            words.append(enc_r4(fs3, 0, fs2, fs1, rm, fd, FP_R4_OPS[mnem]))
+        elif mnem in FP_BIN_RM_OPS:
+            fd, fs1, fs2 = parse_freg(ops[0]), parse_freg(ops[1]), parse_freg(ops[2])
+            rm = parse_rm(ops[3]) if len(ops) > 3 else 7
+            words.append(enc_r(FP_BIN_RM_OPS[mnem], fs2, fs1, rm, fd, opcode=0x53))
+        elif mnem == "fsqrt.s":
+            fd, fs1 = parse_freg(ops[0]), parse_freg(ops[1])
+            rm = parse_rm(ops[2]) if len(ops) > 2 else 7
+            words.append(enc_r(0x2C, 0, fs1, rm, fd, opcode=0x53))
+        elif mnem in FP_SGNJ_OPS:
+            fd, fs1, fs2 = parse_freg(ops[0]), parse_freg(ops[1]), parse_freg(ops[2])
+            words.append(enc_r(0x10, fs2, fs1, FP_SGNJ_OPS[mnem], fd, opcode=0x53))
+        elif mnem in FP_MINMAX_OPS:
+            fd, fs1, fs2 = parse_freg(ops[0]), parse_freg(ops[1]), parse_freg(ops[2])
+            words.append(enc_r(0x14, fs2, fs1, FP_MINMAX_OPS[mnem], fd, opcode=0x53))
+        elif mnem in FP_CMP_OPS:
+            rd, fs1, fs2 = parse_reg(ops[0]), parse_freg(ops[1]), parse_freg(ops[2])
+            words.append(enc_r(0x50, fs2, fs1, FP_CMP_OPS[mnem], rd, opcode=0x53))
+        elif mnem in ("fcvt.w.s", "fcvt.wu.s"):
+            rd, fs1 = parse_reg(ops[0]), parse_freg(ops[1])
+            rm = parse_rm(ops[2]) if len(ops) > 2 else 7
+            words.append(enc_r(0x60, 0 if mnem == "fcvt.w.s" else 1, fs1, rm, rd, opcode=0x53))
+        elif mnem in ("fcvt.s.w", "fcvt.s.wu"):
+            fd, rs1 = parse_freg(ops[0]), parse_reg(ops[1])
+            rm = parse_rm(ops[2]) if len(ops) > 2 else 7
+            words.append(enc_r(0x68, 0 if mnem == "fcvt.s.w" else 1, rs1, rm, fd, opcode=0x53))
+        elif mnem in ("fmv.x.w", "fmv.x.s"):
+            rd, fs1 = parse_reg(ops[0]), parse_freg(ops[1])
+            words.append(enc_r(0x70, 0, fs1, 0x0, rd, opcode=0x53))
+        elif mnem == "fclass.s":
+            rd, fs1 = parse_reg(ops[0]), parse_freg(ops[1])
+            words.append(enc_r(0x70, 0, fs1, 0x1, rd, opcode=0x53))
+        elif mnem in ("fmv.w.x", "fmv.s.x"):
+            fd, rs1 = parse_freg(ops[0]), parse_reg(ops[1])
+            words.append(enc_r(0x78, 0, rs1, 0x0, fd, opcode=0x53))
         else:
             raise ValueError(f"Unsupported mnemonic at PC=0x{cur_pc:x}: '{mnem}' {ops}")
 
@@ -647,6 +807,43 @@ def disassemble(word: int) -> str:
         return f"jal x{rd}, {imm_j}"
     elif op == 0x67 and f3 == 0x0:
         return f"jalr x{rd}, x{rs1}, {imm_i}"
+    elif op == 0x07 and f3 == 0x2:
+        return f"flw f{rd}, {imm_i}(x{rs1})"
+    elif op == 0x27 and f3 == 0x2:
+        return f"fsw f{rs2}, {imm_s}(x{rs1})"
+    elif op in (0x43, 0x47, 0x4B, 0x4F) and ((word >> 25) & 3) == 0:
+        rs3 = (word >> 27) & 0x1F
+        name = {0x43: "fmadd.s", 0x47: "fmsub.s", 0x4B: "fnmsub.s", 0x4F: "fnmadd.s"}[op]
+        rms = FP_RM_REV.get(f3, str(f3))
+        return f"{name} f{rd}, f{rs1}, f{rs2}, f{rs3}, {rms}"
+    elif op == 0x53:
+        rms = FP_RM_REV.get(f3, str(f3))
+        if f7 == 0x00:
+            return f"fadd.s f{rd}, f{rs1}, f{rs2}, {rms}"
+        if f7 == 0x04:
+            return f"fsub.s f{rd}, f{rs1}, f{rs2}, {rms}"
+        if f7 == 0x08:
+            return f"fmul.s f{rd}, f{rs1}, f{rs2}, {rms}"
+        if f7 == 0x0C:
+            return f"fdiv.s f{rd}, f{rs1}, f{rs2}, {rms}"
+        if f7 == 0x2C and rs2 == 0:
+            return f"fsqrt.s f{rd}, f{rs1}, {rms}"
+        if f7 == 0x10 and f3 in (0, 1, 2):
+            return f"{['fsgnj.s', 'fsgnjn.s', 'fsgnjx.s'][f3]} f{rd}, f{rs1}, f{rs2}"
+        if f7 == 0x14 and f3 in (0, 1):
+            return f"{['fmin.s', 'fmax.s'][f3]} f{rd}, f{rs1}, f{rs2}"
+        if f7 == 0x50 and f3 in (0, 1, 2):
+            return f"{['fle.s', 'flt.s', 'feq.s'][f3]} x{rd}, f{rs1}, f{rs2}"
+        if f7 == 0x60 and rs2 in (0, 1):
+            return f"{'fcvt.w.s' if rs2 == 0 else 'fcvt.wu.s'} x{rd}, f{rs1}, {rms}"
+        if f7 == 0x68 and rs2 in (0, 1):
+            return f"{'fcvt.s.w' if rs2 == 0 else 'fcvt.s.wu'} f{rd}, x{rs1}, {rms}"
+        if f7 == 0x70 and rs2 == 0 and f3 == 0:
+            return f"fmv.x.w x{rd}, f{rs1}"
+        if f7 == 0x70 and rs2 == 0 and f3 == 1:
+            return f"fclass.s x{rd}, f{rs1}"
+        if f7 == 0x78 and rs2 == 0 and f3 == 0:
+            return f"fmv.w.x f{rd}, x{rs1}"
     return f".word 0x{word:08x}"
 
 
@@ -667,6 +864,8 @@ class CommitEvent:
     mem_wstrb: int
     mem_wdata: int
     halted: int
+    rd_is_fp: int = 0
+    fflags: int = 0
 
     def format_line(self) -> str:
         return (
@@ -675,6 +874,9 @@ class CommitEvent:
             f"{self.mem_valid} {self.mem_we} {self.mem_addr:08x} "
             f"{self.mem_wstrb:01x} {self.mem_wdata:08x} {self.halted}"
         )
+
+    def format_fp_line(self) -> str:
+        return f"{self.format_line()} {self.rd_is_fp} {self.fflags:02x}"
 
 
 class RV32IMA_ISS:
@@ -700,6 +902,7 @@ class RV32IMA_ISS:
                     self.dmem[base + 2] = (w >> 16) & 0xFF
                     self.dmem[base + 3] = (w >> 24) & 0xFF
         self.regs = [0] * 32
+        self.fregs = [0] * 32
         self.pc = 0
         self.steps = 0
         self.halted = False
@@ -710,6 +913,8 @@ class RV32IMA_ISS:
         self.mstatus_mie = 0
         self.mstatus_mpie = 0
         self.mstatus_fs = 1
+        self.fflags = 0
+        self.frm = 0
         self.mie = 0
         self.mtvec = 0
         self.mscratch = 0
@@ -717,7 +922,7 @@ class RV32IMA_ISS:
         self.mcause = 0
         self.mtval = 0
         self.mip = 0
-        self.misa = 0x4000_1101
+        self.misa = 0x4000_1121
         self.mcycle = 0
         self.minstret = 0
         self.trap_count = 0
@@ -777,6 +982,12 @@ class RV32IMA_ISS:
         return u32(self.imem[idx])
 
     def _csr_read(self, csr_addr: int) -> Optional[int]:
+        if csr_addr == 0x001:
+            return self.fflags if self.mstatus_fs != 0 else None
+        if csr_addr == 0x002:
+            return self.frm if self.mstatus_fs != 0 else None
+        if csr_addr == 0x003:
+            return (((self.frm & 7) << 5) | (self.fflags & 0x1F)) if self.mstatus_fs != 0 else None
         if csr_addr == 0x300:
             return self._mstatus_val()
         if csr_addr == 0x301:
@@ -817,7 +1028,23 @@ class RV32IMA_ISS:
         if (csr_addr >> 10) == 0x3:
             return False
         v = u32(val)
-        if csr_addr == 0x300:
+        if csr_addr == 0x001:
+            if self.mstatus_fs == 0:
+                return False
+            self.fflags = v & 0x1F
+            self.mstatus_fs = 3
+        elif csr_addr == 0x002:
+            if self.mstatus_fs == 0:
+                return False
+            self.frm = v & 0x7
+            self.mstatus_fs = 3
+        elif csr_addr == 0x003:
+            if self.mstatus_fs == 0:
+                return False
+            self.fflags = v & 0x1F
+            self.frm = (v >> 5) & 0x7
+            self.mstatus_fs = 3
+        elif csr_addr == 0x300:
             self.mstatus_mie = (v >> 3) & 1
             self.mstatus_mpie = (v >> 7) & 1
             self.mstatus_fs = (v >> 13) & 3
@@ -886,7 +1113,9 @@ class RV32IMA_ISS:
 
         next_pc = u32(cur_pc + 4)
         rd_we = 0
+        rd_is_fp = 0
         rd_wdata = 0
+        inst_fflags = 0
         mem_valid = 0
         mem_we = 0
         mem_addr = 0
@@ -1162,14 +1391,131 @@ class RV32IMA_ISS:
             else:
                 self._take_trap(cur_pc, 2, instr)
                 return None
+        elif op == 0x07:  # LOAD-FP (FLW)
+            if self.mstatus_fs == 0 or f3 != 0x2:
+                self._take_trap(cur_pc, 2, instr)
+                return None
+            addr = u32(v1 + imm_i)
+            if (addr & 3) != 0:
+                self._take_trap(cur_pc, 4, addr)
+                return None
+            mem_valid = 1
+            mem_we = 0
+            mem_addr = addr
+            rd_we = 1
+            rd_is_fp = 1
+            rd_wdata = self.read_word(addr)
+        elif op == 0x27:  # STORE-FP (FSW)
+            if self.mstatus_fs == 0 or f3 != 0x2:
+                self._take_trap(cur_pc, 2, instr)
+                return None
+            addr = u32(v1 + imm_s)
+            if (addr & 3) != 0:
+                self._take_trap(cur_pc, 6, addr)
+                return None
+            fval2 = self.fregs[rs2]
+            mem_valid = 1
+            mem_we = 1
+            mem_addr = addr
+            mem_wstrb = 0xF
+            mem_wdata = u32(fval2)
+            if self.resv_valid and self.resv_line == (addr & ~0xF):
+                self.resv_valid = False
+            self.write_word(addr, fval2)
+        elif op in (0x43, 0x47, 0x4B, 0x4F):  # FMADD/FMSUB/FNMSUB/FNMADD.S
+            fmt = (instr >> 25) & 3
+            eff_rm = self.frm if f3 == 7 else f3
+            if self.mstatus_fs == 0 or fmt != 0 or f3 in (5, 6) or eff_rm > 4:
+                self._take_trap(cur_pc, 2, instr)
+                return None
+            rs3 = (instr >> 27) & 0x1F
+            fma_op = {0x43: fpo.FMA_FMADD, 0x47: fpo.FMA_FMSUB, 0x4B: fpo.FMA_FNMSUB, 0x4F: fpo.FMA_FNMADD}[op]
+            rd_wdata, inst_fflags = fpo.eval_fma(fma_op, self.fregs[rs1], self.fregs[rs2], self.fregs[rs3], eff_rm)
+            rd_we = 1
+            rd_is_fp = 1
+        elif op == 0x53:  # OP-FP
+            if self.mstatus_fs == 0:
+                self._take_trap(cur_pc, 2, instr)
+                return None
+            eff_rm = self.frm if f3 == 7 else f3
+            rm_bad = (f3 in (5, 6)) or (eff_rm > 4)
+            fv1 = self.fregs[rs1]
+            fv2 = self.fregs[rs2]
+            if f7 == 0x00:  # FADD.S
+                if rm_bad:
+                    self._take_trap(cur_pc, 2, instr); return None
+                rd_wdata, inst_fflags = fpo.eval_fma(fpo.FMA_FADD, fv1, fv2, 0, eff_rm)
+                rd_we, rd_is_fp = 1, 1
+            elif f7 == 0x04:  # FSUB.S
+                if rm_bad:
+                    self._take_trap(cur_pc, 2, instr); return None
+                rd_wdata, inst_fflags = fpo.eval_fma(fpo.FMA_FSUB, fv1, fv2, 0, eff_rm)
+                rd_we, rd_is_fp = 1, 1
+            elif f7 == 0x08:  # FMUL.S
+                if rm_bad:
+                    self._take_trap(cur_pc, 2, instr); return None
+                rd_wdata, inst_fflags = fpo.eval_fma(fpo.FMA_FMUL, fv1, fv2, 0, eff_rm)
+                rd_we, rd_is_fp = 1, 1
+            elif f7 == 0x0C:  # FDIV.S
+                if rm_bad:
+                    self._take_trap(cur_pc, 2, instr); return None
+                rd_wdata, inst_fflags = fpo.eval_div_sqrt(fpo.FDIV_DIV, fv1, fv2, eff_rm)
+                rd_we, rd_is_fp = 1, 1
+            elif f7 == 0x2C:  # FSQRT.S
+                if rs2 != 0 or rm_bad:
+                    self._take_trap(cur_pc, 2, instr); return None
+                rd_wdata, inst_fflags = fpo.eval_div_sqrt(fpo.FDIV_SQRT, fv1, 0, eff_rm)
+                rd_we, rd_is_fp = 1, 1
+            elif f7 == 0x10 and f3 in (0, 1, 2):  # FSGNJ/N/X.S
+                mop = [fpo.FMISC_SGNJ, fpo.FMISC_SGNJN, fpo.FMISC_SGNJX][f3]
+                rd_wdata, inst_fflags = fpo.eval_misc(mop, fv1, fv2, 0)
+                rd_we, rd_is_fp = 1, 1
+            elif f7 == 0x14 and f3 in (0, 1):  # FMIN/FMAX.S
+                mop = fpo.FMISC_MIN if f3 == 0 else fpo.FMISC_MAX
+                rd_wdata, inst_fflags = fpo.eval_misc(mop, fv1, fv2, 0)
+                rd_we, rd_is_fp = 1, 1
+            elif f7 == 0x50 and f3 in (0, 1, 2):  # FLE/FLT/FEQ.S
+                mop = [fpo.FMISC_LE, fpo.FMISC_LT, fpo.FMISC_EQ][f3]
+                rd_wdata, inst_fflags = fpo.eval_misc(mop, fv1, fv2, 0)
+                rd_we, rd_is_fp = 1, 0
+            elif f7 == 0x60 and rs2 in (0, 1):  # FCVT.W/WU.S
+                if rm_bad:
+                    self._take_trap(cur_pc, 2, instr); return None
+                mop = fpo.FMISC_CVT_WS if rs2 == 0 else fpo.FMISC_CVT_WUS
+                rd_wdata, inst_fflags = fpo.eval_misc(mop, fv1, 0, eff_rm)
+                rd_we, rd_is_fp = 1, 0
+            elif f7 == 0x68 and rs2 in (0, 1):  # FCVT.S.W/WU
+                if rm_bad:
+                    self._take_trap(cur_pc, 2, instr); return None
+                mop = fpo.FMISC_CVT_SW if rs2 == 0 else fpo.FMISC_CVT_SWU
+                rd_wdata, inst_fflags = fpo.eval_misc(mop, v1, 0, eff_rm)
+                rd_we, rd_is_fp = 1, 1
+            elif f7 == 0x70 and rs2 == 0 and f3 in (0, 1):  # FMV.X.W / FCLASS.S
+                mop = fpo.FMISC_MV_XW if f3 == 0 else fpo.FMISC_CLASS
+                rd_wdata, inst_fflags = fpo.eval_misc(mop, fv1, 0, 0)
+                rd_we, rd_is_fp = 1, 0
+            elif f7 == 0x78 and rs2 == 0 and f3 == 0:  # FMV.W.X
+                rd_wdata, inst_fflags = fpo.eval_misc(fpo.FMISC_MV_WX, v1, 0, 0)
+                rd_we, rd_is_fp = 1, 1
+            else:
+                self._take_trap(cur_pc, 2, instr)
+                return None
         else:
             self._take_trap(cur_pc, 2, instr)
             return None
 
-        if rd_we and rd != 0:
+        if inst_fflags != 0:
+            self.fflags = (self.fflags | inst_fflags) & 0x1F
+            if self.mstatus_fs != 0:
+                self.mstatus_fs = 3
+        if rd_is_fp and rd_we:
+            self.fregs[rd] = u32(rd_wdata)
+            if self.mstatus_fs != 0:
+                self.mstatus_fs = 3
+        elif rd_we and rd != 0:
             self.regs[rd] = u32(rd_wdata)
         else:
-            if rd == 0:
+            if not rd_is_fp and rd == 0:
                 rd_we = 0
                 rd_wdata = 0
 
@@ -1189,6 +1535,8 @@ class RV32IMA_ISS:
             mem_wstrb=mem_wstrb,
             mem_wdata=mem_wdata,
             halted=1 if self.halted else 0,
+            rd_is_fp=rd_is_fp if rd_we else 0,
+            fflags=inst_fflags,
         )
         self.steps += 1
         return ev
@@ -1217,6 +1565,11 @@ def write_hex(words: List[int], path: Path, pad_words: int = 0) -> None:
 def write_trace(trace: List[CommitEvent], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(ev.format_line() for ev in trace) + "\n", encoding="utf-8")
+
+
+def write_fp_trace(trace: List[CommitEvent], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(ev.format_fp_line() for ev in trace) + "\n", encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------

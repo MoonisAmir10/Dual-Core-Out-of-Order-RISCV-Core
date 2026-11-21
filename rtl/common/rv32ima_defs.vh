@@ -5,7 +5,7 @@
 // ============================================================================
 
 // ----------------------------------------------------------------------------
-// RISC-V RV32IMA_Zicsr_Zifencei Major Opcodes (instr[6:0])
+// RISC-V RV32IMAF_Zicsr_Zifencei Major Opcodes (instr[6:0])
 // ----------------------------------------------------------------------------
 localparam [6:0] OP_LUI      = 7'b0110111;
 localparam [6:0] OP_AUIPC    = 7'b0010111;
@@ -13,12 +13,19 @@ localparam [6:0] OP_JAL      = 7'b1101111;
 localparam [6:0] OP_JALR     = 7'b1100111;
 localparam [6:0] OP_BRANCH   = 7'b1100011;
 localparam [6:0] OP_LOAD     = 7'b0000011;
+localparam [6:0] OP_LOAD_FP  = 7'b0000111; // RV32F: FLW
 localparam [6:0] OP_STORE    = 7'b0100011;
+localparam [6:0] OP_STORE_FP = 7'b0100111; // RV32F: FSW
 localparam [6:0] OP_OP_IMM   = 7'b0010011;
 localparam [6:0] OP_OP       = 7'b0110011;
 localparam [6:0] OP_MISC_MEM = 7'b0001111; // FENCE, FENCE.I
 localparam [6:0] OP_AMO      = 7'b0101111; // RV32A: LR.W, SC.W, AMO*.W
-localparam [6:0] OP_SYSTEM   = 7'b1110011; // EBREAK, CSRR*
+localparam [6:0] OP_MADD     = 7'b1000011; // RV32F: FMADD.S
+localparam [6:0] OP_MSUB     = 7'b1000111; // RV32F: FMSUB.S
+localparam [6:0] OP_NMSUB    = 7'b1001011; // RV32F: FNMSUB.S
+localparam [6:0] OP_NMADD    = 7'b1001111; // RV32F: FNMADD.S
+localparam [6:0] OP_OP_FP    = 7'b1010011; // RV32F: FADD..FMV
+localparam [6:0] OP_SYSTEM   = 7'b1110011; // EBREAK, ECALL, MRET, CSRR*
 
 localparam [31:0] INSTR_NOP    = 32'h0000_0013; // addi x0, x0, 0
 localparam [31:0] INSTR_ECALL  = 32'h0000_0073; // ecall (M-mode environment call)
@@ -151,16 +158,19 @@ localparam [2:0] IMM_U = 3'd3;
 localparam [2:0] IMM_J = 3'd4;
 
 // ----------------------------------------------------------------------------
-// Functional Unit Routing Class (fu_type[2:0])
+// Functional Unit Routing Class (fu_type[3:0])
 // ----------------------------------------------------------------------------
-localparam [2:0] FU_ALU    = 3'd0;
-localparam [2:0] FU_MUL    = 3'd1;
-localparam [2:0] FU_DIV    = 3'd2;
-localparam [2:0] FU_BR     = 3'd3; // Branches, JAL, JALR
-localparam [2:0] FU_LOAD   = 3'd4;
-localparam [2:0] FU_STORE  = 3'd5;
-localparam [2:0] FU_SYSTEM = 3'd6; // EBREAK, CSRR*, FENCE, FENCE.I
-localparam [2:0] FU_AMO    = 3'd7; // RV32A: LR.W, SC.W, AMO*.W
+localparam [3:0] FU_ALU    = 4'd0;
+localparam [3:0] FU_MUL    = 4'd1;
+localparam [3:0] FU_DIV    = 4'd2;
+localparam [3:0] FU_BR     = 4'd3;  // Branches, JAL, JALR
+localparam [3:0] FU_LOAD   = 4'd4;  // LB/LH/LW/LBU/LHU + FLW
+localparam [3:0] FU_STORE  = 4'd5;  // SB/SH/SW + FSW
+localparam [3:0] FU_SYSTEM = 4'd6;  // EBREAK, ECALL, MRET, CSRR*, FENCE, FENCE.I
+localparam [3:0] FU_AMO    = 4'd7;  // RV32A: LR.W, SC.W, AMO*.W
+localparam [3:0] FU_FMA    = 4'd8;  // RV32F: FMADD/FMSUB/FNMSUB/FNMADD/FADD/FSUB/FMUL
+localparam [3:0] FU_FDIV   = 4'd9;  // RV32F: FDIV.S, FSQRT.S
+localparam [3:0] FU_FMISC  = 4'd10; // RV32F: FSGNJ/FMIN/FMAX/FCMP/FCLASS/FCVT/FMV
 
 // ----------------------------------------------------------------------------
 // Dual-Core 2-Wide OoO Default Sizing Parameters

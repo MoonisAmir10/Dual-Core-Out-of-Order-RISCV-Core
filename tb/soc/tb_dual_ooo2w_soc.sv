@@ -30,20 +30,20 @@ reg clk, reset_n, dram_jitter_en;
 // 4-Wide RVFI Commit Trace
 wire        c0_c0_v, c0_c1_v, c1_c0_v, c1_c1_v;
 wire [31:0] c0_c0_seq, c0_c0_pc, c0_c0_ins, c0_c0_rdw, c0_c0_ma, c0_c0_md;
-wire        c0_c0_rwe, c0_c0_mv, c0_c0_mw;
-wire [4:0]  c0_c0_rda; wire [3:0] c0_c0_ms;
+wire        c0_c0_rwe, c0_c0_rfp, c0_c0_mv, c0_c0_mw;
+wire [4:0]  c0_c0_rda, c0_c0_ff; wire [3:0] c0_c0_ms;
 
 wire [31:0] c0_c1_seq, c0_c1_pc, c0_c1_ins, c0_c1_rdw, c0_c1_ma, c0_c1_md;
-wire        c0_c1_rwe, c0_c1_mv, c0_c1_mw;
-wire [4:0]  c0_c1_rda; wire [3:0] c0_c1_ms;
+wire        c0_c1_rwe, c0_c1_rfp, c0_c1_mv, c0_c1_mw;
+wire [4:0]  c0_c1_rda, c0_c1_ff; wire [3:0] c0_c1_ms;
 
 wire [31:0] c1_c0_seq, c1_c0_pc, c1_c0_ins, c1_c0_rdw, c1_c0_ma, c1_c0_md;
-wire        c1_c0_rwe, c1_c0_mv, c1_c0_mw;
-wire [4:0]  c1_c0_rda; wire [3:0] c1_c0_ms;
+wire        c1_c0_rwe, c1_c0_rfp, c1_c0_mv, c1_c0_mw;
+wire [4:0]  c1_c0_rda, c1_c0_ff; wire [3:0] c1_c0_ms;
 
 wire [31:0] c1_c1_seq, c1_c1_pc, c1_c1_ins, c1_c1_rdw, c1_c1_ma, c1_c1_md;
-wire        c1_c1_rwe, c1_c1_mv, c1_c1_mw;
-wire [4:0]  c1_c1_rda; wire [3:0] c1_c1_ms;
+wire        c1_c1_rwe, c1_c1_rfp, c1_c1_mv, c1_c1_mw;
+wire [4:0]  c1_c1_rda, c1_c1_ff; wire [3:0] c1_c1_ms;
 
 wire        bus_evt_v, bus_evt_src, bus_evt_c2c, bus_evt_sh;
 wire [1:0]  bus_evt_op;
@@ -79,19 +79,19 @@ dual_ooo2w_soc #(
 ) u_dut (
     .clk(clk), .reset_n(reset_n), .dram_jitter_en(dram_jitter_en),
     .c0_commit0_valid(c0_c0_v), .c0_commit0_seq_id(c0_c0_seq), .c0_commit0_pc(c0_c0_pc), .c0_commit0_instr(c0_c0_ins),
-    .c0_commit0_rd_we(c0_c0_rwe), .c0_commit0_rd_addr(c0_c0_rda), .c0_commit0_rd_wdata(c0_c0_rdw),
+    .c0_commit0_rd_we(c0_c0_rwe), .c0_commit0_rd_is_fp(c0_c0_rfp), .c0_commit0_rd_addr(c0_c0_rda), .c0_commit0_rd_wdata(c0_c0_rdw), .c0_commit0_fflags(c0_c0_ff),
     .c0_commit0_mem_valid(c0_c0_mv), .c0_commit0_mem_we(c0_c0_mw),
     .c0_commit0_mem_addr(c0_c0_ma), .c0_commit0_mem_wstrb(c0_c0_ms), .c0_commit0_mem_wdata(c0_c0_md),
     .c0_commit1_valid(c0_c1_v), .c0_commit1_seq_id(c0_c1_seq), .c0_commit1_pc(c0_c1_pc), .c0_commit1_instr(c0_c1_ins),
-    .c0_commit1_rd_we(c0_c1_rwe), .c0_commit1_rd_addr(c0_c1_rda), .c0_commit1_rd_wdata(c0_c1_rdw),
+    .c0_commit1_rd_we(c0_c1_rwe), .c0_commit1_rd_is_fp(c0_c1_rfp), .c0_commit1_rd_addr(c0_c1_rda), .c0_commit1_rd_wdata(c0_c1_rdw), .c0_commit1_fflags(c0_c1_ff),
     .c0_commit1_mem_valid(c0_c1_mv), .c0_commit1_mem_we(c0_c1_mw),
     .c0_commit1_mem_addr(c0_c1_ma), .c0_commit1_mem_wstrb(c0_c1_ms), .c0_commit1_mem_wdata(c0_c1_md),
     .c1_commit0_valid(c1_c0_v), .c1_commit0_seq_id(c1_c0_seq), .c1_commit0_pc(c1_c0_pc), .c1_commit0_instr(c1_c0_ins),
-    .c1_commit0_rd_we(c1_c0_rwe), .c1_commit0_rd_addr(c1_c0_rda), .c1_commit0_rd_wdata(c1_c0_rdw),
+    .c1_commit0_rd_we(c1_c0_rwe), .c1_commit0_rd_is_fp(c1_c0_rfp), .c1_commit0_rd_addr(c1_c0_rda), .c1_commit0_rd_wdata(c1_c0_rdw), .c1_commit0_fflags(c1_c0_ff),
     .c1_commit0_mem_valid(c1_c0_mv), .c1_commit0_mem_we(c1_c0_mw),
     .c1_commit0_mem_addr(c1_c0_ma), .c1_commit0_mem_wstrb(c1_c0_ms), .c1_commit0_mem_wdata(c1_c0_md),
     .c1_commit1_valid(c1_c1_v), .c1_commit1_seq_id(c1_c1_seq), .c1_commit1_pc(c1_c1_pc), .c1_commit1_instr(c1_c1_ins),
-    .c1_commit1_rd_we(c1_c1_rwe), .c1_commit1_rd_addr(c1_c1_rda), .c1_commit1_rd_wdata(c1_c1_rdw),
+    .c1_commit1_rd_we(c1_c1_rwe), .c1_commit1_rd_is_fp(c1_c1_rfp), .c1_commit1_rd_addr(c1_c1_rda), .c1_commit1_rd_wdata(c1_c1_rdw), .c1_commit1_fflags(c1_c1_ff),
     .c1_commit1_mem_valid(c1_c1_mv), .c1_commit1_mem_we(c1_c1_mw),
     .c1_commit1_mem_addr(c1_c1_ma), .c1_commit1_mem_wstrb(c1_c1_ms), .c1_commit1_mem_wdata(c1_c1_md),
     .bus_evt_valid(bus_evt_v), .bus_evt_src(bus_evt_src), .bus_evt_op(bus_evt_op),
@@ -260,21 +260,21 @@ always @(posedge clk) begin
             if (d1_wr_v)
                 $fwrite(log_fd, "W %0d 1 %04x %032x\n", sim_cyc, d1_wr_la, d1_wr_dat);
             if (c0_c0_v)
-                $fwrite(log_fd, "C %0d 0 %08x %08x %0d %0d %08x %0d %0d %08x %0x %08x\n",
+                $fwrite(log_fd, "C %0d 0 %08x %08x %0d %0d %08x %0d %0d %08x %0x %08x %0d %02x\n",
                         sim_cyc, c0_c0_pc, c0_c0_ins, c0_c0_rwe, c0_c0_rda, c0_c0_rdw,
-                        c0_c0_mv, c0_c0_mw, c0_c0_ma, c0_c0_ms, c0_c0_md);
+                        c0_c0_mv, c0_c0_mw, c0_c0_ma, c0_c0_ms, c0_c0_md, c0_c0_rfp, c0_c0_ff);
             if (c0_c1_v)
-                $fwrite(log_fd, "C %0d 0 %08x %08x %0d %0d %08x %0d %0d %08x %0x %08x\n",
+                $fwrite(log_fd, "C %0d 0 %08x %08x %0d %0d %08x %0d %0d %08x %0x %08x %0d %02x\n",
                         sim_cyc, c0_c1_pc, c0_c1_ins, c0_c1_rwe, c0_c1_rda, c0_c1_rdw,
-                        c0_c1_mv, c0_c1_mw, c0_c1_ma, c0_c1_ms, c0_c1_md);
+                        c0_c1_mv, c0_c1_mw, c0_c1_ma, c0_c1_ms, c0_c1_md, c0_c1_rfp, c0_c1_ff);
             if (c1_c0_v)
-                $fwrite(log_fd, "C %0d 1 %08x %08x %0d %0d %08x %0d %0d %08x %0x %08x\n",
+                $fwrite(log_fd, "C %0d 1 %08x %08x %0d %0d %08x %0d %0d %08x %0x %08x %0d %02x\n",
                         sim_cyc, c1_c0_pc, c1_c0_ins, c1_c0_rwe, c1_c0_rda, c1_c0_rdw,
-                        c1_c0_mv, c1_c0_mw, c1_c0_ma, c1_c0_ms, c1_c0_md);
+                        c1_c0_mv, c1_c0_mw, c1_c0_ma, c1_c0_ms, c1_c0_md, c1_c0_rfp, c1_c0_ff);
             if (c1_c1_v)
-                $fwrite(log_fd, "C %0d 1 %08x %08x %0d %0d %08x %0d %0d %08x %0x %08x\n",
+                $fwrite(log_fd, "C %0d 1 %08x %08x %0d %0d %08x %0d %0d %08x %0x %08x %0d %02x\n",
                         sim_cyc, c1_c1_pc, c1_c1_ins, c1_c1_rwe, c1_c1_rda, c1_c1_rdw,
-                        c1_c1_mv, c1_c1_mw, c1_c1_ma, c1_c1_ms, c1_c1_md);
+                        c1_c1_mv, c1_c1_mw, c1_c1_ma, c1_c1_ms, c1_c1_md, c1_c1_rfp, c1_c1_ff);
         end
     end
 end

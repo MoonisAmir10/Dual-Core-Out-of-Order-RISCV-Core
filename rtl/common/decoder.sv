@@ -1,25 +1,33 @@
 `timescale 1ns / 1ps
 
 // ============================================================================
-// Full RV32IMA_Zicsr_Zifencei Instruction Decoder
+// Full RV32IMAF_Zicsr_Zifencei Instruction Decoder (Phase U6)
 // Supports:
-//   - Base RV32I (all 37 user instructions + EBREAK)
+//   - Base RV32I (all 37 user instructions + EBREAK, ECALL, MRET)
 //   - RV32M (MUL, MULH, MULHSU, MULHU, DIV, DIVU, REM, REMU)
 //   - RV32A (LR.W, SC.W, AMOSWAP/ADD/XOR/AND/OR/MIN/MAX/MINU/MAXU.W + aq/rl)
+//   - RV32F (All 26 Single-Precision IEEE-754 instructions + mstatus.FS & frm checks!)
 //   - Zifencei & Base Ordering (FENCE, FENCE.I)
 //   - Zicsr (CSRRW, CSRRS, CSRRC, CSRRWI, CSRRSI, CSRRCI)
 // ============================================================================
 module decoder (
     input  wire [31:0] instr,
+    input  wire [1:0]  mstatus_fs,
+    input  wire [2:0]  csr_frm,
 
     output wire [4:0]  rs1,
     output wire [4:0]  rs2,
+    output wire [4:0]  rs3,
     output wire [4:0]  rd,
     output reg         uses_rs1,
     output reg         uses_rs2,
+    output reg         uses_rs3,
+    output reg         rs1_is_fp,
+    output reg         rs2_is_fp,
+    output reg         rd_is_fp,
     output reg         rd_we,
     output reg  [2:0]  imm_sel,
-    output reg  [2:0]  fu_type,
+    output reg  [3:0]  fu_type,
     output reg  [3:0]  alu_select,
     output reg         asel,         // 1: PC, 0: rs1
     output reg         bsel,         // 1: imm, 0: rs2
@@ -37,7 +45,7 @@ module decoder (
     output reg         is_ecall,
     output reg         is_mret,
 
-    // Phase 0 Extensions: FENCE / FENCE.I / CSR / RV32A Atomics
+    // FENCE / FENCE.I / CSR / RV32A Atomics
     output reg         is_fence,
     output reg         is_fence_i,
     output reg         is_csr,
@@ -51,27 +59,44 @@ module decoder (
     output wire        amo_aq,
     output wire        amo_rl,
 
+    // RV32F Floating-Point Decode Outputs
+    output reg         is_fp,
+    output reg  [3:0]  fp_op,
+    output reg  [2:0]  fp_rm,
+
     output reg         illegal
 );
 
 `include "rv32ima_defs.vh"
+`include "fpu_defs.vh"
 
 wire [6:0] opcode = instr[6:0];
 wire [2:0] funct3 = instr[14:12];
 wire [6:0] funct7 = instr[31:25];
 wire [4:0] funct5 = instr[31:27];
+wire [1:0] fp_fmt = instr[26:25];
 
 assign rs1       = instr[19:15];
 assign rs2       = instr[24:20];
+assign rs3       = instr[31:27];
 assign rd        = instr[11:7];
 assign br_funct3 = funct3;
 assign csr_addr  = instr[31:20];
 assign amo_aq    = instr[26];
 assign amo_rl    = instr[25];
 
+// Resolved rounding mode & legality for FP ops that consume rm[2:0]
+wire [2:0] rm_resolved = (funct3 == FPU_RM_DYN) ? csr_frm : funct3;
+wire       rm_illegal  = (funct3 == 3'b101) || (funct3 == 3'b110) || (rm_resolved > 3'd4);
+wire       fp_disabled = (mstatus_fs == 2'b00);
+
 always @(*) begin
     uses_rs1     = 1'b0;
     uses_rs2     = 1'b0;
+    uses_rs3     = 1'b0;
+    rs1_is_fp    = 1'b0;
+    rs2_is_fp    = 1'b0;
+    rd_is_fp     = 1'b0;
     rd_we        = 1'b0;
     imm_sel      = IMM_I;
     fu_type      = FU_ALU;
@@ -99,6 +124,9 @@ always @(*) begin
     is_lr        = 1'b0;
     is_sc        = 1'b0;
     amo_op       = AMO_NONE;
+    is_fp        = 1'b0;
+    fp_op        = 4'd0;
+    fp_rm        = rm_resolved;
     illegal      = 1'b0;
 
     case (opcode)
@@ -170,6 +198,23 @@ always @(*) begin
                 illegal = 1'b1;
         end
 
+        OP_LOAD_FP: begin
+            is_fp = 1'b1;
+            if (fp_disabled || (funct3 != 3'b010)) begin
+                illegal = 1'b1;
+            end else begin
+                uses_rs1     = 1'b1;
+                rd_we        = 1'b1; // f0 IS writable!
+                rd_is_fp     = 1'b1;
+                imm_sel      = IMM_I;
+                fu_type      = FU_LOAD;
+                bsel         = 1'b1;
+                mem_read     = 1'b1;
+                mem_size     = MEM_WORD;
+                mem_unsigned = 1'b0;
+            end
+        end
+
         OP_STORE: begin
             uses_rs1   = 1'b1;
             uses_rs2   = 1'b1;
@@ -181,6 +226,22 @@ always @(*) begin
             mem_size   = funct3[1:0];
             if (funct3 != 3'b000 && funct3 != 3'b001 && funct3 != 3'b010)
                 illegal = 1'b1;
+        end
+
+        OP_STORE_FP: begin
+            is_fp = 1'b1;
+            if (fp_disabled || (funct3 != 3'b010)) begin
+                illegal = 1'b1;
+            end else begin
+                uses_rs1   = 1'b1;
+                uses_rs2   = 1'b1;
+                rs2_is_fp  = 1'b1;
+                imm_sel    = IMM_S;
+                fu_type    = FU_STORE;
+                bsel       = 1'b1;
+                mem_write  = 1'b1;
+                mem_size   = MEM_WORD;
+            end
         end
 
         OP_OP_IMM: begin
@@ -214,7 +275,6 @@ always @(*) begin
             uses_rs2 = 1'b1;
             rd_we    = (rd != 5'd0);
             if (funct7 == 7'b0000001) begin
-                // Official RV32M Extension
                 if (!funct3[2]) begin
                     fu_type = FU_MUL;
                     mul_op  = funct3[1:0];
@@ -264,13 +324,144 @@ always @(*) begin
             end
         end
 
+        OP_MADD, OP_MSUB, OP_NMSUB, OP_NMADD: begin
+            is_fp = 1'b1;
+            if (fp_disabled || (fp_fmt != 2'b00) || rm_illegal) begin
+                illegal = 1'b1;
+            end else begin
+                uses_rs1  = 1'b1;
+                uses_rs2  = 1'b1;
+                uses_rs3  = 1'b1;
+                rs1_is_fp = 1'b1;
+                rs2_is_fp = 1'b1;
+                rd_is_fp  = 1'b1;
+                rd_we     = 1'b1;
+                fu_type   = FU_FMA;
+                case (opcode)
+                    OP_MADD:  fp_op = {1'b0, FMA_OP_FMADD};
+                    OP_MSUB:  fp_op = {1'b0, FMA_OP_FMSUB};
+                    OP_NMSUB: fp_op = {1'b0, FMA_OP_FNMSUB};
+                    default:  fp_op = {1'b0, FMA_OP_FNMADD};
+                endcase
+            end
+        end
+
+        OP_OP_FP: begin
+            is_fp = 1'b1;
+            if (fp_disabled) begin
+                illegal = 1'b1;
+            end else begin
+                case (funct7)
+                    7'b0000000: begin // FADD.S
+                        if (rm_illegal) illegal = 1'b1;
+                        else begin
+                            uses_rs1 = 1'b1; uses_rs2 = 1'b1; rs1_is_fp = 1'b1; rs2_is_fp = 1'b1;
+                            rd_we = 1'b1; rd_is_fp = 1'b1; fu_type = FU_FMA; fp_op = {1'b0, FMA_OP_FADD};
+                        end
+                    end
+                    7'b0000100: begin // FSUB.S
+                        if (rm_illegal) illegal = 1'b1;
+                        else begin
+                            uses_rs1 = 1'b1; uses_rs2 = 1'b1; rs1_is_fp = 1'b1; rs2_is_fp = 1'b1;
+                            rd_we = 1'b1; rd_is_fp = 1'b1; fu_type = FU_FMA; fp_op = {1'b0, FMA_OP_FSUB};
+                        end
+                    end
+                    7'b0001000: begin // FMUL.S
+                        if (rm_illegal) illegal = 1'b1;
+                        else begin
+                            uses_rs1 = 1'b1; uses_rs2 = 1'b1; rs1_is_fp = 1'b1; rs2_is_fp = 1'b1;
+                            rd_we = 1'b1; rd_is_fp = 1'b1; fu_type = FU_FMA; fp_op = {1'b0, FMA_OP_FMUL};
+                        end
+                    end
+                    7'b0001100: begin // FDIV.S
+                        if (rm_illegal) illegal = 1'b1;
+                        else begin
+                            uses_rs1 = 1'b1; uses_rs2 = 1'b1; rs1_is_fp = 1'b1; rs2_is_fp = 1'b1;
+                            rd_we = 1'b1; rd_is_fp = 1'b1; fu_type = FU_FDIV; fp_op = {3'd0, FDIV_OP_DIV};
+                        end
+                    end
+                    7'b0101100: begin // FSQRT.S
+                        if (rm_illegal || (rs2 != 5'd0)) illegal = 1'b1;
+                        else begin
+                            uses_rs1 = 1'b1; rs1_is_fp = 1'b1;
+                            rd_we = 1'b1; rd_is_fp = 1'b1; fu_type = FU_FDIV; fp_op = {3'd0, FDIV_OP_SQRT};
+                        end
+                    end
+                    7'b0010000: begin // FSGNJ.S / FSGNJN.S / FSGNJX.S
+                        uses_rs1 = 1'b1; uses_rs2 = 1'b1; rs1_is_fp = 1'b1; rs2_is_fp = 1'b1;
+                        rd_we = 1'b1; rd_is_fp = 1'b1; fu_type = FU_FMISC;
+                        case (funct3)
+                            3'b000:  fp_op = FMISC_OP_SGNJ;
+                            3'b001:  fp_op = FMISC_OP_SGNJN;
+                            3'b010:  fp_op = FMISC_OP_SGNJX;
+                            default: illegal = 1'b1;
+                        endcase
+                    end
+                    7'b0010100: begin // FMIN.S / FMAX.S
+                        uses_rs1 = 1'b1; uses_rs2 = 1'b1; rs1_is_fp = 1'b1; rs2_is_fp = 1'b1;
+                        rd_we = 1'b1; rd_is_fp = 1'b1; fu_type = FU_FMISC;
+                        case (funct3)
+                            3'b000:  fp_op = FMISC_OP_MIN;
+                            3'b001:  fp_op = FMISC_OP_MAX;
+                            default: illegal = 1'b1;
+                        endcase
+                    end
+                    7'b1100000: begin // FCVT.W.S / FCVT.WU.S (FP -> INT)
+                        if (rm_illegal || (rs2 > 5'd1)) illegal = 1'b1;
+                        else begin
+                            uses_rs1 = 1'b1; rs1_is_fp = 1'b1;
+                            rd_we = (rd != 5'd0); rd_is_fp = 1'b0; fu_type = FU_FMISC;
+                            fp_op = (rs2 == 5'd0) ? FMISC_OP_CVT_WS : FMISC_OP_CVT_WUS;
+                        end
+                    end
+                    7'b1110000: begin // FMV.X.W / FCLASS.S (FP -> INT)
+                        if (rs2 != 5'd0) illegal = 1'b1;
+                        else begin
+                            uses_rs1 = 1'b1; rs1_is_fp = 1'b1;
+                            rd_we = (rd != 5'd0); rd_is_fp = 1'b0; fu_type = FU_FMISC;
+                            case (funct3)
+                                3'b000:  fp_op = FMISC_OP_MV_XW;
+                                3'b001:  fp_op = FMISC_OP_CLASS;
+                                default: illegal = 1'b1;
+                            endcase
+                        end
+                    end
+                    7'b1010000: begin // FLE.S / FLT.S / FEQ.S (FP -> INT)
+                        uses_rs1 = 1'b1; uses_rs2 = 1'b1; rs1_is_fp = 1'b1; rs2_is_fp = 1'b1;
+                        rd_we = (rd != 5'd0); rd_is_fp = 1'b0; fu_type = FU_FMISC;
+                        case (funct3)
+                            3'b000:  fp_op = FMISC_OP_LE;
+                            3'b001:  fp_op = FMISC_OP_LT;
+                            3'b010:  fp_op = FMISC_OP_EQ;
+                            default: illegal = 1'b1;
+                        endcase
+                    end
+                    7'b1101000: begin // FCVT.S.W / FCVT.S.WU (INT -> FP)
+                        if (rm_illegal || (rs2 > 5'd1)) illegal = 1'b1;
+                        else begin
+                            uses_rs1 = 1'b1; rs1_is_fp = 1'b0;
+                            rd_we = 1'b1; rd_is_fp = 1'b1; fu_type = FU_FMISC;
+                            fp_op = (rs2 == 5'd0) ? FMISC_OP_CVT_SW : FMISC_OP_CVT_SWU;
+                        end
+                    end
+                    7'b1111000: begin // FMV.W.X (INT -> FP)
+                        if ((rs2 != 5'd0) || (funct3 != 3'b000)) illegal = 1'b1;
+                        else begin
+                            uses_rs1 = 1'b1; rs1_is_fp = 1'b0;
+                            rd_we = 1'b1; rd_is_fp = 1'b1; fu_type = FU_FMISC;
+                            fp_op = FMISC_OP_MV_WX;
+                        end
+                    end
+                    default: illegal = 1'b1;
+                endcase
+            end
+        end
+
         OP_MISC_MEM: begin
             fu_type = FU_SYSTEM;
             if (funct3 == 3'b000) begin
-                // FENCE (includes FENCE.TSO)
                 is_fence = 1'b1;
             end else if (funct3 == 3'b001) begin
-                // FENCE.I (Zifencei)
                 is_fence_i = 1'b1;
             end else begin
                 illegal = 1'b1;
@@ -278,7 +469,6 @@ always @(*) begin
         end
 
         OP_AMO: begin
-            // Official RV32A Extension (word-width funct3 == 3'b010 only)
             if (funct3 != 3'b010) begin
                 illegal = 1'b1;
             end else begin
@@ -302,58 +492,31 @@ always @(*) begin
                         mem_write = 1'b1;
                     end
                     F5_AMOSWAP: begin
-                        uses_rs2  = 1'b1;
-                        amo_op    = AMO_SWAP;
-                        mem_read  = 1'b1;
-                        mem_write = 1'b1;
+                        uses_rs2  = 1'b1; amo_op = AMO_SWAP; mem_read = 1'b1; mem_write = 1'b1;
                     end
                     F5_AMOADD: begin
-                        uses_rs2  = 1'b1;
-                        amo_op    = AMO_ADD;
-                        mem_read  = 1'b1;
-                        mem_write = 1'b1;
+                        uses_rs2  = 1'b1; amo_op = AMO_ADD;  mem_read = 1'b1; mem_write = 1'b1;
                     end
                     F5_AMOXOR: begin
-                        uses_rs2  = 1'b1;
-                        amo_op    = AMO_XOR;
-                        mem_read  = 1'b1;
-                        mem_write = 1'b1;
+                        uses_rs2  = 1'b1; amo_op = AMO_XOR;  mem_read = 1'b1; mem_write = 1'b1;
                     end
                     F5_AMOAND: begin
-                        uses_rs2  = 1'b1;
-                        amo_op    = AMO_AND;
-                        mem_read  = 1'b1;
-                        mem_write = 1'b1;
+                        uses_rs2  = 1'b1; amo_op = AMO_AND;  mem_read = 1'b1; mem_write = 1'b1;
                     end
                     F5_AMOOR: begin
-                        uses_rs2  = 1'b1;
-                        amo_op    = AMO_OR;
-                        mem_read  = 1'b1;
-                        mem_write = 1'b1;
+                        uses_rs2  = 1'b1; amo_op = AMO_OR;   mem_read = 1'b1; mem_write = 1'b1;
                     end
                     F5_AMOMIN: begin
-                        uses_rs2  = 1'b1;
-                        amo_op    = AMO_MIN;
-                        mem_read  = 1'b1;
-                        mem_write = 1'b1;
+                        uses_rs2  = 1'b1; amo_op = AMO_MIN;  mem_read = 1'b1; mem_write = 1'b1;
                     end
                     F5_AMOMAX: begin
-                        uses_rs2  = 1'b1;
-                        amo_op    = AMO_MAX;
-                        mem_read  = 1'b1;
-                        mem_write = 1'b1;
+                        uses_rs2  = 1'b1; amo_op = AMO_MAX;  mem_read = 1'b1; mem_write = 1'b1;
                     end
                     F5_AMOMINU: begin
-                        uses_rs2  = 1'b1;
-                        amo_op    = AMO_MINU;
-                        mem_read  = 1'b1;
-                        mem_write = 1'b1;
+                        uses_rs2  = 1'b1; amo_op = AMO_MINU; mem_read = 1'b1; mem_write = 1'b1;
                     end
                     F5_AMOMAXU: begin
-                        uses_rs2  = 1'b1;
-                        amo_op    = AMO_MAXU;
-                        mem_read  = 1'b1;
-                        mem_write = 1'b1;
+                        uses_rs2  = 1'b1; amo_op = AMO_MAXU; mem_read = 1'b1; mem_write = 1'b1;
                     end
                     default: begin
                         is_amo  = 1'b0;
@@ -405,6 +568,10 @@ always @(*) begin
     if (illegal) begin
         uses_rs1     = 1'b0;
         uses_rs2     = 1'b0;
+        uses_rs3     = 1'b0;
+        rs1_is_fp    = 1'b0;
+        rs2_is_fp    = 1'b0;
+        rd_is_fp     = 1'b0;
         rd_we        = 1'b0;
         fu_type      = FU_SYSTEM;
         is_branch    = 1'b0;
@@ -422,6 +589,7 @@ always @(*) begin
         is_lr        = 1'b0;
         is_sc        = 1'b0;
         amo_op       = AMO_NONE;
+        is_fp        = 1'b0;
     end
 end
 

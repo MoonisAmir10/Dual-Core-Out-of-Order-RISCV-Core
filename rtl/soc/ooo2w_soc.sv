@@ -122,6 +122,8 @@ wire         stat_rob_full, stat_rs_full, stat_lsq_full, stat_cp_full;
 wire         stat_stlf_hit, stat_br_fast_squash, stat_div_ovl, stat_dcm_ovl;
 wire         stat_dual_disp, stat_dual_cdb, stat_dual_commit;
 wire         stat_replay_u, stat_amo_u, stat_fence_u, stat_trap_u;
+wire         c0_rd_fp_u, c1_rd_fp_u;
+wire [4:0]   c0_fflags_u, c1_fflags_u;
 wire [1:0]   stat_br_total_cnt, stat_br_mispred_cnt, stat_war_waw_cnt;
 wire [3:0]   stat_ex_byp_cnt;
 wire [1:0]   stat_ras_pred_cnt, stat_ras_mispred_cnt;
@@ -161,12 +163,12 @@ ooo2w_core #(
     .irq_msip(1'b0), .irq_mtip(1'b0), .irq_meip(1'b0),
     .commit0_valid(commit0_valid), .commit0_seq_id(commit0_seq_id),
     .commit0_pc(commit0_pc), .commit0_instr(commit0_instr),
-    .commit0_rd_we(commit0_rd_we), .commit0_rd_addr(commit0_rd_addr), .commit0_rd_wdata(commit0_rd_wdata),
+    .commit0_rd_we(commit0_rd_we), .commit0_rd_is_fp(c0_rd_fp_u), .commit0_rd_addr(commit0_rd_addr), .commit0_rd_wdata(commit0_rd_wdata), .commit0_fflags(c0_fflags_u),
     .commit0_mem_valid(commit0_mem_valid), .commit0_mem_we(commit0_mem_we),
     .commit0_mem_addr(commit0_mem_addr), .commit0_mem_wstrb(commit0_mem_wstrb), .commit0_mem_wdata(commit0_mem_wdata),
     .commit1_valid(commit1_valid), .commit1_seq_id(commit1_seq_id),
     .commit1_pc(commit1_pc), .commit1_instr(commit1_instr),
-    .commit1_rd_we(commit1_rd_we), .commit1_rd_addr(commit1_rd_addr), .commit1_rd_wdata(commit1_rd_wdata),
+    .commit1_rd_we(commit1_rd_we), .commit1_rd_is_fp(c1_rd_fp_u), .commit1_rd_addr(commit1_rd_addr), .commit1_rd_wdata(commit1_rd_wdata), .commit1_fflags(c1_fflags_u),
     .commit1_mem_valid(commit1_mem_valid), .commit1_mem_we(commit1_mem_we),
     .commit1_mem_addr(commit1_mem_addr), .commit1_mem_wstrb(commit1_mem_wstrb), .commit1_mem_wdata(commit1_mem_wdata),
     .trace_disp0_valid(trace_disp0_valid), .trace_disp0_seq(trace_disp0_seq),

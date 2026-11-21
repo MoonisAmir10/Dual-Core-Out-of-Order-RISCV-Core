@@ -24,36 +24,40 @@ reg  [4:0]  csr_rs1_uimm;
 reg  [31:0] csr_rs1_val;
 
 wire [31:0] c0_rdata, c1_rdata, c0_mtvec, c1_mtvec, c0_mepc, c1_mepc;
-wire        c0_aill,  c1_aill,  c0_ill,   c1_ill;
+wire        c0_aill,  c1_aill,  c0_ill,   c1_ill,   c0_cs,   c1_cs;
 wire        c0_irqp,  c1_irqp;
 wire [3:0]  c0_irqc,  c1_irqc;
 wire [1:0]  c0_fs,    c1_fs;
+wire [2:0]  c0_frm,   c1_frm;
+wire [4:0]  c0_fflg,  c1_fflg;
 wire [63:0] c0_cyc,   c1_cyc;
 wire [63:0] c0_ret,   c1_ret;
 
 csr_unit #(.CORE_ID(32'd0)) u_csr0 (
     .clk(clk), .reset_n(reset_n), .halted(halted), .retire_cnt(retire_cnt),
+    .fp_commit_dirty(1'b0), .fp_commit_fflags(5'd0),
     .csr_req_valid(csr_req_valid), .csr_op(csr_op), .csr_addr(csr_addr),
     .csr_rs1_uimm(csr_rs1_uimm), .csr_rs1_val(csr_rs1_val),
-    .csr_rdata(c0_rdata), .csr_access_illegal(c0_aill), .csr_illegal(c0_ill),
+    .csr_rdata(c0_rdata), .csr_access_illegal(c0_aill), .csr_illegal(c0_ill), .csr_sync_required(c0_cs),
     .irq_msip(1'b0), .irq_mtip(1'b0), .irq_meip(1'b0),
     .trap_enter(1'b0), .trap_is_irq(1'b0), .trap_cause(4'd0), .trap_pc(32'd0), .trap_tval(32'd0),
     .mret_exec(1'b0),
     .mtvec_out(c0_mtvec), .mepc_out(c0_mepc), .irq_pending(c0_irqp), .irq_cause(c0_irqc),
-    .mstatus_fs_out(c0_fs),
+    .mstatus_fs_out(c0_fs), .frm_out(c0_frm), .fflags_out(c0_fflg),
     .mcycle_out(c0_cyc), .minstret_out(c0_ret)
 );
 
 csr_unit #(.CORE_ID(32'd1)) u_csr1 (
     .clk(clk), .reset_n(reset_n), .halted(halted), .retire_cnt(retire_cnt),
+    .fp_commit_dirty(1'b0), .fp_commit_fflags(5'd0),
     .csr_req_valid(csr_req_valid), .csr_op(csr_op), .csr_addr(csr_addr),
     .csr_rs1_uimm(csr_rs1_uimm), .csr_rs1_val(csr_rs1_val),
-    .csr_rdata(c1_rdata), .csr_access_illegal(c1_aill), .csr_illegal(c1_ill),
+    .csr_rdata(c1_rdata), .csr_access_illegal(c1_aill), .csr_illegal(c1_ill), .csr_sync_required(c1_cs),
     .irq_msip(1'b0), .irq_mtip(1'b0), .irq_meip(1'b0),
     .trap_enter(1'b0), .trap_is_irq(1'b0), .trap_cause(4'd0), .trap_pc(32'd0), .trap_tval(32'd0),
     .mret_exec(1'b0),
     .mtvec_out(c1_mtvec), .mepc_out(c1_mepc), .irq_pending(c1_irqp), .irq_cause(c1_irqc),
-    .mstatus_fs_out(c1_fs),
+    .mstatus_fs_out(c1_fs), .frm_out(c1_frm), .fflags_out(c1_fflg),
     .mcycle_out(c1_cyc), .minstret_out(c1_ret)
 );
 

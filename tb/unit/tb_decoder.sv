@@ -10,9 +10,12 @@ module tb_decoder;
 `include "rv32ima_defs.vh"
 
 reg  [31:0] instr;
-wire [4:0]  rs1, rs2, rd;
-wire        uses_rs1, uses_rs2, rd_we;
-wire [2:0]  imm_sel, fu_type;
+reg  [1:0]  mstatus_fs;
+reg  [2:0]  csr_frm;
+wire [4:0]  rs1, rs2, rs3, rd;
+wire        uses_rs1, uses_rs2, uses_rs3, rs1_is_fp, rs2_is_fp, rd_is_fp, rd_we;
+wire [2:0]  imm_sel;
+wire [3:0]  fu_type;
 wire [3:0]  alu_select;
 wire        asel, bsel;
 wire [1:0]  mul_op, div_op;
@@ -28,12 +31,16 @@ wire        csr_use_imm;
 wire        is_amo, is_lr, is_sc;
 wire [3:0]  amo_op;
 wire        amo_aq, amo_rl;
+wire        is_fp;
+wire [3:0]  fp_op;
+wire [2:0]  fp_rm;
 wire        illegal;
 
 decoder dut (
-    .instr(instr),
-    .rs1(rs1), .rs2(rs2), .rd(rd),
-    .uses_rs1(uses_rs1), .uses_rs2(uses_rs2), .rd_we(rd_we),
+    .instr(instr), .mstatus_fs(mstatus_fs), .csr_frm(csr_frm),
+    .rs1(rs1), .rs2(rs2), .rs3(rs3), .rd(rd),
+    .uses_rs1(uses_rs1), .uses_rs2(uses_rs2), .uses_rs3(uses_rs3),
+    .rs1_is_fp(rs1_is_fp), .rs2_is_fp(rs2_is_fp), .rd_is_fp(rd_is_fp), .rd_we(rd_we),
     .imm_sel(imm_sel), .fu_type(fu_type), .alu_select(alu_select),
     .asel(asel), .bsel(bsel), .mul_op(mul_op), .div_op(div_op),
     .br_funct3(br_funct3), .is_branch(is_branch), .is_jal(is_jal), .is_jalr(is_jalr),
@@ -43,13 +50,14 @@ decoder dut (
     .is_csr(is_csr), .csr_op(csr_op), .csr_addr(csr_addr), .csr_use_imm(csr_use_imm),
     .is_amo(is_amo), .is_lr(is_lr), .is_sc(is_sc), .amo_op(amo_op),
     .amo_aq(amo_aq), .amo_rl(amo_rl),
+    .is_fp(is_fp), .fp_op(fp_op), .fp_rm(fp_rm),
     .illegal(illegal)
 );
 
 integer errors;
 integer checks;
 
-task check_cond(input cond, input [255:0] msg);
+task check_cond(input cond, input [511:0] msg);
     begin
         checks = checks + 1;
         if (!cond) begin
@@ -87,6 +95,8 @@ endfunction
 initial begin
     errors = 0;
     checks = 0;
+    mstatus_fs = 2'b01;
+    csr_frm = 3'b000;
 
     // 1. RV32I / RV32M spot checks
     instr = 32'h0020_81B3; #1; // add x3, x1, x2
@@ -194,8 +204,66 @@ initial begin
     instr = 32'hFFFF_FFFF; #1; // all-ones illegal opcode
     check_cond(illegal && fu_type == FU_SYSTEM && !rd_we && !mem_read && !mem_write && !is_branch, "Illegal 0xFFFFFFFF clamp");
 
+    // 5. Full RV32F Single-Precision Decode (all 26 ops, f0 writable, mstatus.FS=0 & bad rm illegal)
+    mstatus_fs = 2'b01; csr_frm = 3'b000;
+    // FLW f0, 16(x2) -> rd_we MUST be 1 even for f0!
+    instr = {12'd16, 5'd2, 3'b010, 5'd0, OP_LOAD_FP}; #1;
+    check_cond(!illegal && fu_type == FU_LOAD && is_fp && mem_read && rd_is_fp && rd_we && uses_rs1 && !rs1_is_fp, "FLW f0");
+    // FSW f3, -4(x2)
+    instr = {7'h7F, 5'd3, 5'd2, 3'b010, 5'h1C, OP_STORE_FP}; #1;
+    check_cond(!illegal && fu_type == FU_STORE && is_fp && mem_write && !rd_we && uses_rs1 && !rs1_is_fp && uses_rs2 && rs2_is_fp, "FSW f3");
+    // FMADD/FMSUB/FNMSUB/FNMADD.S f0, f1, f2, f3, dyn (rm=7 -> resolved to csr_frm=3'b010)
+    csr_frm = 3'b010;
+    instr = {5'd3, 2'b00, 5'd2, 5'd1, 3'b111, 5'd0, OP_MADD}; #1;
+    check_cond(!illegal && fu_type == FU_FMA && is_fp && uses_rs1 && uses_rs2 && uses_rs3 && rs1_is_fp && rs2_is_fp && rd_is_fp && rd_we && fp_rm == 3'b010, "FMADD.S dyn");
+    instr = {5'd3, 2'b00, 5'd2, 5'd1, 3'b000, 5'd4, OP_MSUB}; #1;
+    check_cond(!illegal && fu_type == FU_FMA && is_fp && uses_rs3 && fp_rm == 3'b000, "FMSUB.S");
+    instr = {5'd3, 2'b00, 5'd2, 5'd1, 3'b001, 5'd4, OP_NMSUB}; #1;
+    check_cond(!illegal && fu_type == FU_FMA && is_fp && uses_rs3 && fp_rm == 3'b001, "FNMSUB.S");
+    instr = {5'd3, 2'b00, 5'd2, 5'd1, 3'b011, 5'd4, OP_NMADD}; #1;
+    check_cond(!illegal && fu_type == FU_FMA && is_fp && uses_rs3 && fp_rm == 3'b011, "FNMADD.S");
+    // FADD / FSUB / FMUL / FDIV / FSQRT
+    instr = {7'h00, 5'd2, 5'd1, 3'b000, 5'd0, OP_OP_FP}; #1;
+    check_cond(!illegal && fu_type == FU_FMA && !uses_rs3 && rd_is_fp && rd_we, "FADD.S f0");
+    instr = {7'h04, 5'd2, 5'd1, 3'b000, 5'd5, OP_OP_FP}; #1;
+    check_cond(!illegal && fu_type == FU_FMA && !uses_rs3 && rd_is_fp && rd_we, "FSUB.S");
+    instr = {7'h08, 5'd2, 5'd1, 3'b000, 5'd5, OP_OP_FP}; #1;
+    check_cond(!illegal && fu_type == FU_FMA && !uses_rs3 && rd_is_fp && rd_we, "FMUL.S");
+    instr = {7'h0C, 5'd2, 5'd1, 3'b000, 5'd5, OP_OP_FP}; #1;
+    check_cond(!illegal && fu_type == FU_FDIV && uses_rs1 && uses_rs2 && rd_is_fp && rd_we, "FDIV.S");
+    instr = {7'h2C, 5'd0, 5'd1, 3'b000, 5'd5, OP_OP_FP}; #1;
+    check_cond(!illegal && fu_type == FU_FDIV && uses_rs1 && !uses_rs2 && rd_is_fp && rd_we, "FSQRT.S");
+    // FSGNJ/N/X, FMIN/FMAX, FEQ/FLT/FLE, FCLASS, FMV.X.W, FMV.W.X, FCVT
+    instr = {7'h10, 5'd2, 5'd1, 3'b010, 5'd5, OP_OP_FP}; #1;
+    check_cond(!illegal && fu_type == FU_FMISC && rd_is_fp && rd_we, "FSGNJX.S");
+    instr = {7'h14, 5'd2, 5'd1, 3'b001, 5'd5, OP_OP_FP}; #1;
+    check_cond(!illegal && fu_type == FU_FMISC && rd_is_fp && rd_we, "FMAX.S");
+    instr = {7'h50, 5'd2, 5'd1, 3'b010, 5'd5, OP_OP_FP}; #1;
+    check_cond(!illegal && fu_type == FU_FMISC && !rd_is_fp && rd_we && rs1_is_fp && rs2_is_fp, "FEQ.S");
+    instr = {7'h60, 5'd1, 5'd1, 3'b001, 5'd5, OP_OP_FP}; #1;
+    check_cond(!illegal && fu_type == FU_FMISC && !rd_is_fp && rd_we && rs1_is_fp && !uses_rs2, "FCVT.WU.S");
+    instr = {7'h68, 5'd0, 5'd1, 3'b000, 5'd0, OP_OP_FP}; #1;
+    check_cond(!illegal && fu_type == FU_FMISC && rd_is_fp && rd_we && !rs1_is_fp && !uses_rs2, "FCVT.S.W f0");
+    instr = {7'h70, 5'd0, 5'd1, 3'b000, 5'd5, OP_OP_FP}; #1;
+    check_cond(!illegal && fu_type == FU_FMISC && !rd_is_fp && rd_we && rs1_is_fp, "FMV.X.W");
+    instr = {7'h70, 5'd0, 5'd1, 3'b001, 5'd5, OP_OP_FP}; #1;
+    check_cond(!illegal && fu_type == FU_FMISC && !rd_is_fp && rd_we && rs1_is_fp, "FCLASS.S");
+    instr = {7'h78, 5'd0, 5'd1, 3'b000, 5'd0, OP_OP_FP}; #1;
+    check_cond(!illegal && fu_type == FU_FMISC && rd_is_fp && rd_we && !rs1_is_fp, "FMV.W.X f0");
+    // Illegal RM (5, 6, or dyn with csr_frm=5) & mstatus.FS == 00 illegal!
+    instr = {7'h00, 5'd2, 5'd1, 3'b101, 5'd5, OP_OP_FP}; #1;
+    check_cond(illegal && !is_fp && !rd_we, "Illegal FADD rm=5");
+    csr_frm = 3'b101;
+    instr = {7'h00, 5'd2, 5'd1, 3'b111, 5'd5, OP_OP_FP}; #1;
+    check_cond(illegal && !is_fp && !rd_we, "Illegal FADD dyn csr_frm=5");
+    csr_frm = 3'b000; mstatus_fs = 2'b00;
+    instr = {7'h00, 5'd2, 5'd1, 3'b000, 5'd5, OP_OP_FP}; #1;
+    check_cond(illegal && !is_fp && !rd_we, "Illegal FADD when mstatus.FS==Off");
+    instr = {12'd0, 5'd2, 3'b010, 5'd1, OP_LOAD_FP}; #1;
+    check_cond(illegal && !mem_read && !rd_we, "Illegal FLW when mstatus.FS==Off");
+
     if (errors == 0)
-        $display("PASS [tb_decoder]: %0d/%0d RV32IMA_Zicsr_Zifencei decoder checks passed!", checks, checks);
+        $display("PASS [tb_decoder]: %0d/%0d RV32IMAF_Zicsr_Zifencei decoder checks passed!", checks, checks);
     else begin
         $display("FAIL [tb_decoder]: %0d errors out of %0d checks!", errors, checks);
         $fatal(1);

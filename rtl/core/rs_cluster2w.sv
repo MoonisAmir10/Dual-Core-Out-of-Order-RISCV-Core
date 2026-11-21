@@ -63,13 +63,16 @@ module rs_cluster2w #(
     input  wire [TAG_W-1:0] disp1_qk,
     input  wire             disp1_qk_valid,
 
-    // Dual-CDB wakeup broadcast snoop
+    // Triple-CDB wakeup broadcast snoop (INT CDB0, INT CDB1, Dedicated FP CDB2)
     input  wire             cdb0_valid,
     input  wire [TAG_W-1:0] cdb0_tag,
     input  wire [31:0]      cdb0_val,
     input  wire             cdb1_valid,
     input  wire [TAG_W-1:0] cdb1_tag,
     input  wire [31:0]      cdb1_val,
+    input  wire             cdb2_valid,
+    input  wire [TAG_W-1:0] cdb2_tag,
+    input  wire [31:0]      cdb2_val,
 
     // 1-Cycle Speculative Issue-Stage Tag Wakeup + Registered EX->EX Bypass Data
     input  wire             wk0_valid,
@@ -236,37 +239,41 @@ always @(*) begin
                                                           e_vk[issue1_idx];
 end
 
-// Defensive same-cycle Dual-CDB & Early Issue-Wakeup check on incoming disp0 & disp1
+// Defensive same-cycle Triple-CDB & Early Issue-Wakeup check on incoming disp0 & disp1
 wire        d0_j_c0    = disp0_qj_valid && cdb0_valid && (disp0_qj == cdb0_tag);
 wire        d0_j_c1    = disp0_qj_valid && !d0_j_c0 && cdb1_valid && (disp0_qj == cdb1_tag);
-wire        d0_j_w0    = disp0_qj_valid && !d0_j_c0 && !d0_j_c1 && wk0_valid && (disp0_qj == wk0_tag);
-wire        d0_j_w1    = disp0_qj_valid && !d0_j_c0 && !d0_j_c1 && !d0_j_w0 && wk1_valid && (disp0_qj == wk1_tag);
-wire [31:0] d0_vj_e    = d0_j_c0 ? cdb0_val : (d0_j_c1 ? cdb1_val : disp0_vj);
-wire        d0_qj_e    = (d0_j_c0 || d0_j_c1 || d0_j_w0 || d0_j_w1) ? 1'b0 : disp0_qj_valid;
+wire        d0_j_c2    = disp0_qj_valid && !d0_j_c0 && !d0_j_c1 && cdb2_valid && (disp0_qj == cdb2_tag);
+wire        d0_j_w0    = disp0_qj_valid && !d0_j_c0 && !d0_j_c1 && !d0_j_c2 && wk0_valid && (disp0_qj == wk0_tag);
+wire        d0_j_w1    = disp0_qj_valid && !d0_j_c0 && !d0_j_c1 && !d0_j_c2 && !d0_j_w0 && wk1_valid && (disp0_qj == wk1_tag);
+wire [31:0] d0_vj_e    = d0_j_c0 ? cdb0_val : (d0_j_c1 ? cdb1_val : (d0_j_c2 ? cdb2_val : disp0_vj));
+wire        d0_qj_e    = (d0_j_c0 || d0_j_c1 || d0_j_c2 || d0_j_w0 || d0_j_w1) ? 1'b0 : disp0_qj_valid;
 wire [1:0]  d0_qjbyp_e = d0_j_w0 ? BYP_ALU0 : (d0_j_w1 ? BYP_ALU1 : BYP_NONE);
 
 wire        d0_k_c0    = disp0_qk_valid && cdb0_valid && (disp0_qk == cdb0_tag);
 wire        d0_k_c1    = disp0_qk_valid && !d0_k_c0 && cdb1_valid && (disp0_qk == cdb1_tag);
-wire        d0_k_w0    = disp0_qk_valid && !d0_k_c0 && !d0_k_c1 && wk0_valid && (disp0_qk == wk0_tag);
-wire        d0_k_w1    = disp0_qk_valid && !d0_k_c0 && !d0_k_c1 && !d0_k_w0 && wk1_valid && (disp0_qk == wk1_tag);
-wire [31:0] d0_vk_e    = d0_k_c0 ? cdb0_val : (d0_k_c1 ? cdb1_val : disp0_vk);
-wire        d0_qk_e    = (d0_k_c0 || d0_k_c1 || d0_k_w0 || d0_k_w1) ? 1'b0 : disp0_qk_valid;
+wire        d0_k_c2    = disp0_qk_valid && !d0_k_c0 && !d0_k_c1 && cdb2_valid && (disp0_qk == cdb2_tag);
+wire        d0_k_w0    = disp0_qk_valid && !d0_k_c0 && !d0_k_c1 && !d0_k_c2 && wk0_valid && (disp0_qk == wk0_tag);
+wire        d0_k_w1    = disp0_qk_valid && !d0_k_c0 && !d0_k_c1 && !d0_k_c2 && !d0_k_w0 && wk1_valid && (disp0_qk == wk1_tag);
+wire [31:0] d0_vk_e    = d0_k_c0 ? cdb0_val : (d0_k_c1 ? cdb1_val : (d0_k_c2 ? cdb2_val : disp0_vk));
+wire        d0_qk_e    = (d0_k_c0 || d0_k_c1 || d0_k_c2 || d0_k_w0 || d0_k_w1) ? 1'b0 : disp0_qk_valid;
 wire [1:0]  d0_qkbyp_e = d0_k_w0 ? BYP_ALU0 : (d0_k_w1 ? BYP_ALU1 : BYP_NONE);
 
 wire        d1_j_c0    = disp1_qj_valid && cdb0_valid && (disp1_qj == cdb0_tag);
 wire        d1_j_c1    = disp1_qj_valid && !d1_j_c0 && cdb1_valid && (disp1_qj == cdb1_tag);
-wire        d1_j_w0    = disp1_qj_valid && !d1_j_c0 && !d1_j_c1 && wk0_valid && (disp1_qj == wk0_tag);
-wire        d1_j_w1    = disp1_qj_valid && !d1_j_c0 && !d1_j_c1 && !d1_j_w0 && wk1_valid && (disp1_qj == wk1_tag);
-wire [31:0] d1_vj_e    = d1_j_c0 ? cdb0_val : (d1_j_c1 ? cdb1_val : disp1_vj);
-wire        d1_qj_e    = (d1_j_c0 || d1_j_c1 || d1_j_w0 || d1_j_w1) ? 1'b0 : disp1_qj_valid;
+wire        d1_j_c2    = disp1_qj_valid && !d1_j_c0 && !d1_j_c1 && cdb2_valid && (disp1_qj == cdb2_tag);
+wire        d1_j_w0    = disp1_qj_valid && !d1_j_c0 && !d1_j_c1 && !d1_j_c2 && wk0_valid && (disp1_qj == wk0_tag);
+wire        d1_j_w1    = disp1_qj_valid && !d1_j_c0 && !d1_j_c1 && !d1_j_c2 && !d1_j_w0 && wk1_valid && (disp1_qj == wk1_tag);
+wire [31:0] d1_vj_e    = d1_j_c0 ? cdb0_val : (d1_j_c1 ? cdb1_val : (d1_j_c2 ? cdb2_val : disp1_vj));
+wire        d1_qj_e    = (d1_j_c0 || d1_j_c1 || d1_j_c2 || d1_j_w0 || d1_j_w1) ? 1'b0 : disp1_qj_valid;
 wire [1:0]  d1_qjbyp_e = d1_j_w0 ? BYP_ALU0 : (d1_j_w1 ? BYP_ALU1 : BYP_NONE);
 
 wire        d1_k_c0    = disp1_qk_valid && cdb0_valid && (disp1_qk == cdb0_tag);
 wire        d1_k_c1    = disp1_qk_valid && !d1_k_c0 && cdb1_valid && (disp1_qk == cdb1_tag);
-wire        d1_k_w0    = disp1_qk_valid && !d1_k_c0 && !d1_k_c1 && wk0_valid && (disp1_qk == wk0_tag);
-wire        d1_k_w1    = disp1_qk_valid && !d1_k_c0 && !d1_k_c1 && !d1_k_w0 && wk1_valid && (disp1_qk == wk1_tag);
-wire [31:0] d1_vk_e    = d1_k_c0 ? cdb0_val : (d1_k_c1 ? cdb1_val : disp1_vk);
-wire        d1_qk_e    = (d1_k_c0 || d1_k_c1 || d1_k_w0 || d1_k_w1) ? 1'b0 : disp1_qk_valid;
+wire        d1_k_c2    = disp1_qk_valid && !d1_k_c0 && !d1_k_c1 && cdb2_valid && (disp1_qk == cdb2_tag);
+wire        d1_k_w0    = disp1_qk_valid && !d1_k_c0 && !d1_k_c1 && !d1_k_c2 && wk0_valid && (disp1_qk == wk0_tag);
+wire        d1_k_w1    = disp1_qk_valid && !d1_k_c0 && !d1_k_c1 && !d1_k_c2 && !d1_k_w0 && wk1_valid && (disp1_qk == wk1_tag);
+wire [31:0] d1_vk_e    = d1_k_c0 ? cdb0_val : (d1_k_c1 ? cdb1_val : (d1_k_c2 ? cdb2_val : disp1_vk));
+wire        d1_qk_e    = (d1_k_c0 || d1_k_c1 || d1_k_c2 || d1_k_w0 || d1_k_w1) ? 1'b0 : disp1_qk_valid;
 wire [1:0]  d1_qkbyp_e = d1_k_w0 ? BYP_ALU0 : (d1_k_w1 ? BYP_ALU1 : BYP_NONE);
 
 wire do_issue0 = issue0_valid && fu0_ready;
@@ -328,6 +335,10 @@ always @(posedge clk or negedge reset_n) begin
                         e_vj[k]       <= cdb1_val;
                         e_qj_valid[k] <= 1'b0;
                         e_qj_byp[k]   <= BYP_NONE;
+                    end else if (cdb2_valid && (e_qj[k] == cdb2_tag)) begin
+                        e_vj[k]       <= cdb2_val;
+                        e_qj_valid[k] <= 1'b0;
+                        e_qj_byp[k]   <= BYP_NONE;
                     end else if (wk0_valid && (e_qj[k] == wk0_tag)) begin
                         e_qj_valid[k] <= 1'b0;
                         e_qj_byp[k]   <= BYP_ALU0;
@@ -351,6 +362,10 @@ always @(posedge clk or negedge reset_n) begin
                         e_qk_byp[k]   <= BYP_NONE;
                     end else if (cdb1_valid && (e_qk[k] == cdb1_tag)) begin
                         e_vk[k]       <= cdb1_val;
+                        e_qk_valid[k] <= 1'b0;
+                        e_qk_byp[k]   <= BYP_NONE;
+                    end else if (cdb2_valid && (e_qk[k] == cdb2_tag)) begin
+                        e_vk[k]       <= cdb2_val;
                         e_qk_valid[k] <= 1'b0;
                         e_qk_byp[k]   <= BYP_NONE;
                     end else if (wk0_valid && (e_qk[k] == wk0_tag)) begin

@@ -53,11 +53,15 @@ RTL_MEM = [
 RTL_COH = [
     "rtl/coherence/dcache_nb_coh.sv", "rtl/coherence/coh_interconnect.sv",
 ]
+RTL_FPU = [
+    "rtl/fpu/fpu_fma_pipe.sv", "rtl/fpu/fpu_div_sqrt.sv", "rtl/fpu/fpu_misc.sv",
+]
 RTL_CORE = [
-    "rtl/core/instr_mem2w.sv", "rtl/core/regfile2w.sv", "rtl/core/btb_bht2w.sv",
-    "rtl/core/fetch2w.sv", "rtl/core/rat2w.sv", "rtl/core/rob2w.sv",
-    "rtl/core/rs_cluster2w.sv", "rtl/core/lsq2w.sv", "rtl/core/cdb_arbiter2w.sv",
-    "rtl/core/csr_unit.sv", "rtl/core/ooo2w_core.sv",
+    "rtl/core/instr_mem2w.sv", "rtl/core/regfile2w.sv", "rtl/core/fregfile2w.sv",
+    "rtl/core/btb_bht2w.sv", "rtl/core/fetch2w.sv", "rtl/core/rat2w.sv",
+    "rtl/core/frat2w.sv", "rtl/core/rob2w.sv", "rtl/core/rs_cluster2w.sv",
+    "rtl/core/rs_fpu2w.sv", "rtl/core/lsq2w.sv", "rtl/core/cdb_arbiter2w.sv",
+    "rtl/core/csr_unit.sv", *RTL_FPU, "rtl/core/ooo2w_core.sv",
 ]
 
 # (label, top_module, files, chparam, inst_1c, inst_2c, group, notes)
@@ -68,14 +72,19 @@ SYNTH_UNITS: List[Tuple[str, str, List[str], str, int, int, str, str]] = [
     ("decoder",          "decoder",          ["rtl/common/decoder.sv"],        "", 2, 4, "core", "RV32IMA_Zicsr_Zifencei Decoder (2x/core)"),
     ("imm_gen",          "imm_gen",          ["rtl/common/imm_gen.v"],         "", 2, 4, "core", "Immediate Generator (2x/core)"),
     # --- Core Rename, ROB, Issue, Regfile, LSQ, CDB ---
-    ("rat2w",            "rat2w",            ["rtl/core/rat2w.sv"],            "", 1, 2, "core", "2-Wide RAT + 4 Branch Checkpoints"),
-    ("rob2w",            "rob2w",            ["rtl/core/rob2w.sv"],            "", 1, 2, "core", "32-Entry 2-Wide ROB + Replay & Barrier Gate"),
+    ("rat2w",            "rat2w",            ["rtl/core/rat2w.sv"],            "", 1, 2, "core", "2-Wide INT RAT + 4 Branch Checkpoints"),
+    ("frat2w",           "frat2w",           ["rtl/core/frat2w.sv"],           "", 1, 2, "core", "2-Wide FP RAT (f0..f31) + 4 Branch Checkpoints"),
+    ("rob2w",            "rob2w",            ["rtl/core/rob2w.sv"],            "", 1, 2, "core", "32-Entry 2-Wide ROB + 3-CDB + fflags + Replay"),
     ("rs_alu_8e",        "rs_cluster2w",     ["rtl/core/rs_cluster2w.sv"],     "-chparam ENTRIES 8 -chparam OP_W 4 -chparam DUAL_ISSUE 1", 1, 2, "core", "8-Entry Dual-Issue ALU RS + EX-Bypass"),
     ("rs_mul_4e",        "rs_cluster2w",     ["rtl/core/rs_cluster2w.sv"],     "-chparam ENTRIES 4 -chparam OP_W 2 -chparam DUAL_ISSUE 0", 1, 2, "core", "4-Entry MUL RS"),
     ("rs_div_2e",        "rs_cluster2w",     ["rtl/core/rs_cluster2w.sv"],     "-chparam ENTRIES 2 -chparam OP_W 2 -chparam DUAL_ISSUE 0", 1, 2, "core", "2-Entry DIV RS"),
     ("rs_br_4e",         "rs_cluster2w",     ["rtl/core/rs_cluster2w.sv"],     "-chparam ENTRIES 4 -chparam OP_W 5 -chparam DUAL_ISSUE 0", 1, 2, "core", "4-Entry Branch RS"),
-    ("lsq2w",            "lsq2w",            ["rtl/core/lsq2w.sv"],            "", 1, 2, "core", "8LQ+8SQ Disambig, STLF, RV32A AMO & Snoop-Replay"),
-    ("regfile2w",        "regfile2w",        ["rtl/core/regfile2w.sv"],        "", 1, 2, "core", "32x32b 4R2W Architectural Register File"),
+    ("rs_fma_12e",       "rs_fpu2w",         ["rtl/core/rs_fpu2w.sv"],         "-chparam ENTRIES 12 -chparam HAS_RS3 1", 1, 2, "core", "12-Entry 3-Source FMA RS + 3-CDB Wakeup"),
+    ("rs_fdiv_2e",       "rs_fpu2w",         ["rtl/core/rs_fpu2w.sv"],         "-chparam ENTRIES 2 -chparam HAS_RS3 0", 1, 2, "core", "2-Entry FDIV/FSQRT RS + 3-CDB Wakeup"),
+    ("rs_fmisc_4e",      "rs_fpu2w",         ["rtl/core/rs_fpu2w.sv"],         "-chparam ENTRIES 4 -chparam HAS_RS3 0", 1, 2, "core", "4-Entry FMISC RS + 3-CDB Wakeup"),
+    ("lsq2w",            "lsq2w",            ["rtl/core/lsq2w.sv"],            "", 1, 2, "core", "8LQ+8SQ Disambig, STLF, FLW/FSW, RV32A & Snoop-Replay"),
+    ("regfile2w",        "regfile2w",        ["rtl/core/regfile2w.sv"],        "", 1, 2, "core", "32x32b 4R2W INT Architectural Register File"),
+    ("fregfile2w",       "fregfile2w",       ["rtl/core/fregfile2w.sv"],       "", 1, 2, "core", "32x32b 6R2W FP Architectural Register File (f0 RW)"),
     ("cdb_arbiter2w",    "cdb_arbiter2w",    ["rtl/core/cdb_arbiter2w.sv"],    "", 1, 2, "core", "2-Wide CDB Arbiter (6 FUs -> 2 CDBs)"),
     # --- Core Functional Units & CSR ---
     ("alu",              "alu",              ["rtl/common/alu.v"],             "", 2, 4, "core", "32-bit RV32I ALU (2x/core)"),
@@ -184,7 +193,7 @@ def audit_full_soc_loops(spec: Tuple[str, str, List[str], str]) -> Dict[str, obj
         f"check -assert; "
         f"tee -q -o {scc_p} scc -expect 0"
     )
-    res = subprocess.run([YOSYS, "-q", "-p", script], capture_output=True, text=True, timeout=180)
+    res = subprocess.run([YOSYS, "-q", "-p", script], capture_output=True, text=True, timeout=900)
     log_p.write_text(res.stdout + "\n" + res.stderr, encoding="utf-8")
     if res.returncode != 0:
         raise RuntimeError(f"Full-chip loop/latch check FAILED on {label}:\n{res.stderr}\n{res.stdout[-800:]}")
@@ -286,7 +295,8 @@ def main() -> int:
     out_p.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 
     print("\n--- Apples-to-Apples 1-Core vs. Dual-Core ABC Gate-Level Area Summary ---")
-    print(f"  1x ooo2w_core (all 18 units)  : {c1_core_cells:7,d} cells, {c1_core_ff:6,d} FFs")
+    n_core_u = sum(1 for u in units.values() if u["group"] == "core")
+    print(f"  1x ooo2w_core (all {n_core_u} units)  : {c1_core_cells:7,d} cells, {c1_core_ff:6,d} FFs")
     print(f"  1-Core SoC (1C + L1 + L2)     : {c1_tot_cells:7,d} cells, {c1_tot_ff:6,d} FFs, 40 KB on-chip SRAM")
     print(f"  2-Core SoC (2C + MOESI + L2)  : {c2_tot_cells:7,d} cells, {c2_tot_ff:6,d} FFs, 48 KB on-chip SRAM")
     print(f"  2C / 1C Scaling Ratio         : {cell_ratio:.2f}x cells, {ff_ratio:.2f}x FFs (MOESI crossbar = only {coh_xbar_pct:.2f}% of chip!)")

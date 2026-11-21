@@ -58,6 +58,7 @@ rs_cluster2w #(.ENTRIES(8), .TAG_W(5), .OP_W(4), .DUAL_ISSUE(1)) dut (
     .disp1_vk(disp1_vk), .disp1_qk(disp1_qk), .disp1_qk_valid(disp1_qk_valid),
     .cdb0_valid(cdb0_valid), .cdb0_tag(cdb0_tag), .cdb0_val(cdb0_val),
     .cdb1_valid(cdb1_valid), .cdb1_tag(cdb1_tag), .cdb1_val(cdb1_val),
+    .cdb2_valid(1'b0), .cdb2_tag(5'd0), .cdb2_val(32'd0),
     .wk0_valid(wk0_valid), .wk0_tag(wk0_tag), .wk1_valid(wk1_valid), .wk1_tag(wk1_tag),
     .byp_alu0_val(byp_alu0_val), .byp_alu1_val(byp_alu1_val),
     .issue0_valid(issue0_valid), .fu0_ready(fu0_ready), .issue0_op(issue0_op),
