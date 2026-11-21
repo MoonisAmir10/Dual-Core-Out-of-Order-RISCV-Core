@@ -51,7 +51,7 @@ wire                dc_req_valid, dc_req_is_write, dc_req_is_mmio;
 reg                 dc_req_ready;
 wire [3:0]          dc_req_amo_op;
 wire [AWIDTH-1:0]   dc_req_addr;
-wire [31:0]         dc_req_wdata;
+wire [31:0]         dc_req_paddr, dc_req_wdata;
 wire [3:0]          dc_req_wstrb;
 wire [ID_W-1:0]     dc_req_id;
 wire [TAG_W-1:0]    dc_req_rob_tag;
@@ -60,7 +60,7 @@ reg                 dc_hit_valid, dc_fill_valid, dc_hit_err, dc_fill_err;
 reg  [ID_W-1:0]     dc_hit_id, dc_fill_id;
 reg  [31:0]         dc_hit_rdata, dc_fill_rdata;
 
-wire                sq_empty, trace_iv, stat_stlf;
+wire                sq_empty, mmio_busy, trace_iv, stat_stlf;
 wire [31:0]         trace_iseq;
 wire [1:0]          stat_exb;
 
@@ -97,11 +97,11 @@ lsq2w #(
     .dc_req_valid(dc_req_valid), .dc_req_ready(dc_req_ready),
     .dc_req_is_write(dc_req_is_write), .dc_req_is_mmio(dc_req_is_mmio),
     .dc_req_amo_op(dc_req_amo_op),
-    .dc_req_addr(dc_req_addr), .dc_req_wdata(dc_req_wdata), .dc_req_wstrb(dc_req_wstrb),
+    .dc_req_addr(dc_req_addr), .dc_req_paddr(dc_req_paddr), .dc_req_wdata(dc_req_wdata), .dc_req_wstrb(dc_req_wstrb),
     .dc_req_id(dc_req_id), .dc_req_rob_tag(dc_req_rob_tag),
     .dc_hit_valid(dc_hit_valid), .dc_hit_id(dc_hit_id), .dc_hit_rdata(dc_hit_rdata), .dc_hit_err(dc_hit_err),
     .dc_fill_valid(dc_fill_valid), .dc_fill_id(dc_fill_id), .dc_fill_rdata(dc_fill_rdata), .dc_fill_err(dc_fill_err),
-    .sq_empty(sq_empty), .trace_issue_valid(trace_iv), .trace_issue_seq(trace_iseq),
+    .sq_empty(sq_empty), .mmio_busy(mmio_busy), .trace_issue_valid(trace_iv), .trace_issue_seq(trace_iseq),
     .stat_stlf_hit(stat_stlf), .stat_ex_byp_cnt(stat_exb)
 );
 

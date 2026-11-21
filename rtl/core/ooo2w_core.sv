@@ -12,10 +12,12 @@
 //   - Speculative Load Snoop-Invalidation Replay (coh_snoop_inv -> ROB head replay!)
 // ============================================================================
 module ooo2w_core #(
-    parameter [31:0]  CORE_ID  = 32'd0,
-    parameter [31:0]  RESET_PC = 32'd0,
-    parameter integer AWIDTH   = 20,
-    parameter integer ID_W     = 7
+    parameter [31:0]  CORE_ID         = 32'd0,
+    parameter [31:0]  RESET_PC        = 32'd0,
+    parameter integer AWIDTH          = 20,
+    parameter integer ID_W            = 7,
+    parameter integer ENABLE_MMIO_PMA = 1,
+    parameter [31:0]  RAM_SIZE_BYTES  = 32'h0004_0000
 ) (
     input  wire                clk,
     input  wire                reset_n,
@@ -38,6 +40,7 @@ module ooo2w_core #(
     output wire                dc_req_is_mmio,
     output wire [3:0]          dc_req_amo_op,
     output wire [AWIDTH-1:0]   dc_req_addr,
+    output wire [31:0]         dc_req_paddr,
     output wire [31:0]         dc_req_wdata,
     output wire [3:0]          dc_req_wstrb,
     output wire [ID_W-1:0]     dc_req_id,
@@ -494,7 +497,7 @@ csr_unit #(.CORE_ID(CORE_ID)) u_csr (
 );
 
 // FENCE.I Dirty D-Cache Clean-All Handshake
-wire lsq_sq_empty;
+wire lsq_sq_empty, lsq_mmio_busy;
 wire sq_and_dc_drained = lsq_sq_empty && dc_writes_idle;
 
 reg  fence_i_cleaned;
@@ -595,7 +598,7 @@ rob2w #(.DEPTH(ROB2W_DEPTH), .TAG_W(TAG_W)) u_rob (
     .cdb0_mem_addr(cdb0_mem_addr), .cdb0_mem_wstrb(cdb0_mem_wstrb), .cdb0_mem_wdata(cdb0_mem_wdata),
     .cdb0_exc_valid(cdb0_exc_valid), .cdb0_exc_cause(cdb0_exc_cause), .cdb0_exc_tval(cdb0_exc_tval),
     .cdb1_valid(cdb1_valid), .cdb1_tag(cdb1_tag), .cdb1_val(cdb1_val),
-    .halted_in(halted), .lsq_sq_empty(sq_and_dc_drained),
+    .halted_in(halted), .lsq_sq_empty(sq_and_dc_drained), .lsq_mmio_busy(lsq_mmio_busy),
     .fence_i_ready(fence_i_cleaned),
     .lsq_head0_replay(lsq_head0_replay), .lsq_head1_replay(lsq_head1_replay),
     .irq_pending(csr_irq_pending), .irq_cause(csr_irq_cause),
@@ -1092,7 +1095,9 @@ lsq2w #(
     .SQ_DEPTH(8),
     .TAG_W(TAG_W),
     .ID_W(ID_W),
-    .AWIDTH(AWIDTH)
+    .AWIDTH(AWIDTH),
+    .ENABLE_MMIO_PMA(ENABLE_MMIO_PMA),
+    .RAM_SIZE_BYTES(RAM_SIZE_BYTES)
 ) u_lsq (
     .clk(clk), .reset_n(reset_n), .flush(rob_full_flush),
     .squash_valid(rob_squash), .squash_tag(rob_squash_tag), .rob_head(rob_head_ptr),
@@ -1138,11 +1143,11 @@ lsq2w #(
     .dc_req_valid(dc_req_valid), .dc_req_ready(dc_req_ready),
     .dc_req_is_write(dc_req_is_write), .dc_req_is_mmio(dc_req_is_mmio),
     .dc_req_amo_op(dc_req_amo_op),
-    .dc_req_addr(dc_req_addr), .dc_req_wdata(dc_req_wdata), .dc_req_wstrb(dc_req_wstrb),
+    .dc_req_addr(dc_req_addr), .dc_req_paddr(dc_req_paddr), .dc_req_wdata(dc_req_wdata), .dc_req_wstrb(dc_req_wstrb),
     .dc_req_id(dc_req_id), .dc_req_rob_tag(dc_req_rob_tag),
     .dc_hit_valid(dc_hit_valid), .dc_hit_id(dc_hit_id), .dc_hit_rdata(dc_hit_rdata), .dc_hit_err(dc_hit_err),
     .dc_fill_valid(dc_fill_valid), .dc_fill_id(dc_fill_id), .dc_fill_rdata(dc_fill_rdata), .dc_fill_err(dc_fill_err),
-    .sq_empty(lsq_sq_empty),
+    .sq_empty(lsq_sq_empty), .mmio_busy(lsq_mmio_busy),
     .trace_issue_valid(lsq_trace_issue_v), .trace_issue_seq(lsq_trace_issue_seq),
     .stat_stlf_hit(stat_stlf_hit),
     .stat_ex_byp_cnt(lsq_byp_cnt)

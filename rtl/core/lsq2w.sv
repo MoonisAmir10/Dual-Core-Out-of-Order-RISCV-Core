@@ -6,11 +6,13 @@
 //  Atomic Execution Path, and Speculative Load Snoop-Invalidation Replay!)
 // ============================================================================
 module lsq2w #(
-    parameter integer LQ_DEPTH = 8,
-    parameter integer SQ_DEPTH = 8,
-    parameter integer TAG_W    = 5,
-    parameter integer ID_W     = 7,  // bit[6]=1: ROB-head Atomic; bit[6]=0: {lq_gen[2:0], lq_idx[2:0]}
-    parameter integer AWIDTH   = 20  // 1 MB physical window
+    parameter integer LQ_DEPTH        = 8,
+    parameter integer SQ_DEPTH        = 8,
+    parameter integer TAG_W           = 5,
+    parameter integer ID_W            = 7,           // [6:5]=10: AMO, 11: MMIO Store, [6]=0: {lq_gen[2:0], lq_idx[2:0]}
+    parameter integer AWIDTH          = 20,          // Cacheable RAM physical width
+    parameter integer ENABLE_MMIO_PMA = 1,           // 1: addr >= RAM_SIZE_BYTES routed as uncached APB4 MMIO
+    parameter [31:0]  RAM_SIZE_BYTES  = 32'h0004_0000 // 256 KB cacheable RAM window
 ) (
     input  wire                 clk,
     input  wire                 reset_n,
@@ -99,6 +101,7 @@ module lsq2w #(
     output wire                 dc_req_is_mmio,
     output wire [3:0]           dc_req_amo_op,
     output wire [AWIDTH-1:0]    dc_req_addr,
+    output wire [31:0]          dc_req_paddr,      // Full 32-bit physical address (for APB4 MMIO!)
     output wire [31:0]          dc_req_wdata,
     output wire [3:0]           dc_req_wstrb,
     output wire [ID_W-1:0]      dc_req_id,
@@ -117,6 +120,7 @@ module lsq2w #(
 
     // Status & telemetry
     output wire                 sq_empty,
+    output wire                 mmio_busy,
     output wire                 trace_issue_valid,
     output wire [31:0]          trace_issue_seq,
     output wire                 stat_stlf_hit,
@@ -130,6 +134,12 @@ localparam integer SQ_IDX_W = 3; // 8 entries
 localparam [1:0] BYP_NONE = 2'b00;
 localparam [1:0] BYP_ALU0 = 2'b01;
 localparam [1:0] BYP_ALU1 = 2'b10;
+
+function automatic is_mmio_addr(input [31:0] addr);
+    begin
+        is_mmio_addr = (ENABLE_MMIO_PMA != 0) && (addr >= RAM_SIZE_BYTES);
+    end
+endfunction
 
 function automatic is_mem_misaligned(input [1:0] sz, input [1:0] lane);
     begin
@@ -234,6 +244,7 @@ reg [TAG_W-1:0] sq_qk         [0:SQ_DEPTH-1];
 reg             sq_qk_valid   [0:SQ_DEPTH-1];
 reg [1:0]       sq_qk_byp     [0:SQ_DEPTH-1];
 reg             sq_cdb_sent   [0:SQ_DEPTH-1];
+reg             sq_mmio_sent  [0:SQ_DEPTH-1]; // Already executed synchronously on APB4 before commit!
 
 // ----------------------------------------------------------------------------
 // 2. Load Queue (8-entry non-blocking pool retained until ROB commit!)
@@ -259,7 +270,7 @@ reg             lq_replay     [0:LQ_DEPTH-1]; // Poisoned by external snoop inva
 reg             lq_exc        [0:LQ_DEPTH-1]; // Bus access fault received from D$/MMIO!
 reg [31:0]      lq_data       [0:LQ_DEPTH-1];
 
-// ROB-Head Non-Speculative Atomic Execution Tracker
+// ROB-Head Non-Speculative Atomic & Synchronous Uncached MMIO Trackers
 reg             amo_in_flight;
 reg             amo_done;
 reg             amo_exc_r;
@@ -269,6 +280,13 @@ reg [31:0]      amo_seq_r;
 reg [31:0]      amo_addr_r;
 reg [31:0]      amo_rs2_r;
 reg [31:0]      amo_rdata_r;
+
+reg             mmio_ld_in_flight;
+reg             mmio_st_in_flight;
+reg             mmio_st_done;
+reg             mmio_st_err;
+
+assign mmio_busy = mmio_ld_in_flight || mmio_st_in_flight || mmio_st_done;
 
 // Live EX->EX bypassed addresses & store data
 reg [31:0] lq_addr_eff [0:LQ_DEPTH-1];
@@ -361,12 +379,15 @@ end
 // ----------------------------------------------------------------------------
 // 2b. Combinational Speculative Load Snoop-Invalidation Replay Detection!
 // ----------------------------------------------------------------------------
-wire        dc_hit_is_amo  = dc_hit_valid  && dc_hit_id[ID_W-1];
-wire        dc_fill_is_amo = dc_fill_valid && dc_fill_id[ID_W-1];
-wire [2:0]  hit_idx        = dc_hit_id[2:0];
-wire [2:0]  hit_gen        = dc_hit_id[5:3];
-wire [2:0]  fill_idx       = dc_fill_id[2:0];
-wire [2:0]  fill_gen       = dc_fill_id[5:3];
+wire        dc_hit_is_amo     = dc_hit_valid  && (dc_hit_id[ID_W-1:ID_W-2] == 2'b10);
+wire        dc_hit_is_mmio_st = dc_hit_valid  && (dc_hit_id[ID_W-1:ID_W-2] == 2'b11);
+wire        dc_hit_is_load    = dc_hit_valid  && !dc_hit_id[ID_W-1];
+wire        dc_fill_is_amo    = dc_fill_valid && (dc_fill_id[ID_W-1:ID_W-2] == 2'b10);
+wire        dc_fill_is_load   = dc_fill_valid && !dc_fill_id[ID_W-1];
+wire [2:0]  hit_idx           = dc_hit_id[2:0];
+wire [2:0]  hit_gen           = dc_hit_id[5:3];
+wire [2:0]  fill_idx          = dc_fill_id[2:0];
+wire [2:0]  fill_gen          = dc_fill_id[5:3];
 
 reg [LQ_DEPTH-1:0] lq_snoop_hit_now;
 integer sni;
@@ -376,7 +397,8 @@ always @(*) begin
     lq_head0_replay  = 1'b0;
     lq_head1_replay  = 1'b0;
     for (sni = 0; sni < LQ_DEPTH; sni = sni + 1) begin
-        if (lq_valid[sni] && !lq_from_stlf[sni] && !lq_exc[sni] && !lq_is_misalign[sni]) begin
+        if (lq_valid[sni] && !lq_from_stlf[sni] && !lq_exc[sni] && !lq_is_misalign[sni] &&
+            !is_mmio_addr(lq_addr_eff[sni])) begin
             // Detect snoop match on any SPECULATIVE load (lq_rob_tag != rob_head) that has
             // received data (or is receiving right now). Exempting an unpoisoned load that is
             // already at rob_head guarantees forward progress (zero false-sharing livelock under
@@ -385,8 +407,8 @@ always @(*) begin
                 (lq_rob_tag[sni] != rob_head) &&
                 (lq_addr_eff[sni][AWIDTH-1:4] == coh_snoop_inv_line) &&
                 (lq_done[sni] || lq_cdb_sent[sni] ||
-                 (lq_issued[sni] && dc_hit_valid  && !dc_hit_is_amo  && (hit_idx  == sni[2:0]) && (hit_gen  == lq_gen[sni])) ||
-                 (lq_issued[sni] && dc_fill_valid && !dc_fill_is_amo && (fill_idx == sni[2:0]) && (fill_gen == lq_gen[sni])))) begin
+                 (lq_issued[sni] && dc_hit_is_load  && (hit_idx  == sni[2:0]) && (hit_gen  == lq_gen[sni])) ||
+                 (lq_issued[sni] && dc_fill_is_load && (fill_idx == sni[2:0]) && (fill_gen == lq_gen[sni])))) begin
                 lq_snoop_hit_now[sni] = 1'b1;
             end
             if (lq_replay[sni] || lq_snoop_hit_now[sni]) begin
@@ -445,7 +467,8 @@ always @(*) begin
                     s_ptr = sq_head + si1[3:0];
                     s_idx = s_ptr[2:0];
                     if (!sq_addr_valid[s_idx] ||
-                        is_mem_misaligned(sq_size[s_idx], sq_addr_eff[s_idx][1:0])) begin
+                        is_mem_misaligned(sq_size[s_idx], sq_addr_eff[s_idx][1:0]) ||
+                        is_mmio_addr(sq_addr_eff[s_idx])) begin
                         l_blocked = 1'b1;
                     end else if (sq_addr_eff[s_idx][31:2] == lq_addr_eff[li1][31:2]) begin
                         s_wstrb = calc_byte_mask(sq_size[s_idx], sq_addr_eff[s_idx][1:0]);
@@ -469,8 +492,8 @@ always @(*) begin
             end
 
             if (!l_blocked) begin
-                if (lq_addr_eff[li1][31:24] == 8'h02) begin
-                    // Uncached CLINT MMIO load: strictly non-speculative at ROB head after SQ drain!
+                if (is_mmio_addr(lq_addr_eff[li1])) begin
+                    // Uncached APB4 MMIO / unmapped load: strictly non-speculative at ROB head after SQ drain!
                     if ((lq_rob_tag[li1] == rob_head) && !sq_has_comm_drn && dc_writes_idle)
                         lq_can_cache[li1] = 1'b1;
                 end else if (l_stlf_hit) begin
@@ -520,42 +543,66 @@ always @(*) begin
 end
 
 // ----------------------------------------------------------------------------
-// 4. Split-Transaction D-Cache Request Port (Store Drain > ROB-Head AMO > Load)
+// 4. Split-Transaction D-Cache / APB4 MMIO Request Port
+//    Priority: Cacheable Store Drain > ROB-Head MMIO Store > ROB-Head AMO > Load
 // ----------------------------------------------------------------------------
-wire [2:0] sq_head_idx = sq_head[2:0];
-wire [2:0] sq_tail_idx = sq_tail[2:0];
+wire [2:0] sq_head_idx   = sq_head[2:0];
+wire [2:0] sq_commit_idx = sq_commit_ptr[2:0];
+wire [2:0] sq_tail_idx   = sq_tail[2:0];
+wire       sq_has_uncomm = (sq_tail != sq_commit_ptr);
 
 wire amo_addr_misalign = amo_req_valid && (amo_req_addr[1:0] != 2'b00);
+wire amo_addr_is_mmio  = amo_req_valid && !amo_addr_misalign && is_mmio_addr(amo_req_addr);
 
-wire dc_start_store = sq_has_comm_drn;
-wire dc_start_amo   = !sq_has_comm_drn && sq_empty && dc_writes_idle &&
-                      amo_req_valid && !amo_addr_misalign && !amo_in_flight && !amo_done && !flush;
-wire dc_start_load  = !sq_has_comm_drn && !dc_start_amo && !amo_in_flight &&
-                      cache_ld_pick_v && !flush && !squash_valid;
+wire sq_head_is_mmio_st = sq_has_uncomm &&
+                          sq_addr_valid[sq_commit_idx] &&
+                          !sq_qk_valid[sq_commit_idx] &&
+                          !is_mem_misaligned(sq_size[sq_commit_idx], sq_addr_eff[sq_commit_idx][1:0]) &&
+                          is_mmio_addr(sq_addr_eff[sq_commit_idx]) &&
+                          (sq_rob_tag[sq_commit_idx] == rob_head);
 
-assign dc_req_valid    = dc_start_store || dc_start_amo || dc_start_load;
-assign dc_req_is_write = dc_start_store || (dc_start_amo && (amo_req_op != AMO_LR));
-assign dc_req_is_mmio  = dc_start_store ? (sq_addr_eff[sq_head_idx][31:24] == 8'h02) :
-                         dc_start_amo   ? (amo_req_addr[31:24] == 8'h02)             :
-                                          (lq_addr_eff[cache_ld_pick_idx][31:24] == 8'h02);
+wire dc_start_store   = sq_has_comm_drn;
+wire dc_start_mmio_st = !sq_has_comm_drn && sq_empty && dc_writes_idle &&
+                        sq_head_is_mmio_st && !sq_mmio_sent[sq_commit_idx] &&
+                        !mmio_st_in_flight && !mmio_st_done && !amo_in_flight && !mmio_ld_in_flight && !flush;
+wire dc_start_amo     = !sq_has_comm_drn && sq_empty && dc_writes_idle &&
+                        amo_req_valid && !amo_addr_misalign && !amo_addr_is_mmio &&
+                        !amo_in_flight && !amo_done && !mmio_st_in_flight && !mmio_ld_in_flight && !flush;
+wire dc_start_load    = !sq_has_comm_drn && !dc_start_mmio_st && !dc_start_amo &&
+                        !amo_in_flight && !mmio_st_in_flight && !mmio_ld_in_flight &&
+                        cache_ld_pick_v && !flush && !squash_valid;
+
+assign dc_req_valid    = dc_start_store || dc_start_mmio_st || dc_start_amo || dc_start_load;
+assign dc_req_is_write = dc_start_store || dc_start_mmio_st || (dc_start_amo && (amo_req_op != AMO_LR));
+assign dc_req_is_mmio  = dc_start_store   ? 1'b0 :
+                         dc_start_mmio_st ? 1'b1 :
+                         dc_start_amo     ? 1'b0 :
+                                            is_mmio_addr(lq_addr_eff[cache_ld_pick_idx]);
 assign dc_req_amo_op   = dc_start_amo ? amo_req_op : AMO_NONE;
-assign dc_req_addr     = dc_start_store ? sq_addr_eff[sq_head_idx][AWIDTH-1:0] :
-                         dc_start_amo   ? amo_req_addr[AWIDTH-1:0]             :
-                                          lq_addr_eff[cache_ld_pick_idx][AWIDTH-1:0];
-assign dc_req_wdata    = dc_start_store ? align_store_data(sq_size[sq_head_idx], sq_addr_eff[sq_head_idx][1:0], sq_vk_eff[sq_head_idx]) :
-                                          amo_req_rs2;
-assign dc_req_wstrb    = dc_start_store ? calc_byte_mask(sq_size[sq_head_idx], sq_addr_eff[sq_head_idx][1:0]) :
-                         dc_start_amo   ? 4'hF : 4'd0;
-assign dc_req_id       = dc_start_store ? {ID_W{1'b0}} :
-                         dc_start_amo   ? {1'b1, {(ID_W-1){1'b0}}} :
-                                          {1'b0, lq_gen[cache_ld_pick_idx], cache_ld_pick_idx};
-assign dc_req_rob_tag  = dc_start_store ? sq_rob_tag[sq_head_idx] :
-                         dc_start_amo   ? amo_req_tag             :
-                                          lq_rob_tag[cache_ld_pick_idx];
+assign dc_req_paddr    = dc_start_store   ? sq_addr_eff[sq_head_idx]       :
+                         dc_start_mmio_st ? sq_addr_eff[sq_commit_idx]     :
+                         dc_start_amo     ? amo_req_addr                   :
+                                            lq_addr_eff[cache_ld_pick_idx];
+assign dc_req_addr     = dc_req_paddr[AWIDTH-1:0];
+assign dc_req_wdata    = dc_start_store   ? align_store_data(sq_size[sq_head_idx],   sq_addr_eff[sq_head_idx][1:0],   sq_vk_eff[sq_head_idx])   :
+                         dc_start_mmio_st ? align_store_data(sq_size[sq_commit_idx], sq_addr_eff[sq_commit_idx][1:0], sq_vk_eff[sq_commit_idx]) :
+                                            amo_req_rs2;
+assign dc_req_wstrb    = dc_start_store   ? calc_byte_mask(sq_size[sq_head_idx],   sq_addr_eff[sq_head_idx][1:0])   :
+                         dc_start_mmio_st ? calc_byte_mask(sq_size[sq_commit_idx], sq_addr_eff[sq_commit_idx][1:0]) :
+                         dc_start_amo     ? 4'hF : 4'd0;
+assign dc_req_id       = dc_start_store   ? {ID_W{1'b0}} :
+                         dc_start_mmio_st ? {2'b11, {(ID_W-2){1'b0}}} :
+                         dc_start_amo     ? {2'b10, {(ID_W-2){1'b0}}} :
+                                            {1'b0, lq_gen[cache_ld_pick_idx], cache_ld_pick_idx};
+assign dc_req_rob_tag  = dc_start_store   ? sq_rob_tag[sq_head_idx]   :
+                         dc_start_mmio_st ? sq_rob_tag[sq_commit_idx] :
+                         dc_start_amo     ? amo_req_tag               :
+                                            lq_rob_tag[cache_ld_pick_idx];
 
-wire dc_st_fire  = dc_start_store && dc_req_ready;
-wire dc_amo_fire = dc_start_amo   && dc_req_ready;
-wire dc_ld_fire  = dc_start_load  && dc_req_ready;
+wire dc_st_fire      = dc_start_store   && dc_req_ready;
+wire dc_mmio_st_fire = dc_start_mmio_st && dc_req_ready;
+wire dc_amo_fire     = dc_start_amo     && dc_req_ready;
+wire dc_ld_fire      = dc_start_load    && dc_req_ready;
 
 reg [3:0] sq_survive_cnt, sq_sq_ptr;
 reg [2:0] sq_sq_idx;
@@ -628,8 +675,8 @@ always @(*) begin
         lsu_cdb_exc_valid = amo_exc_r;
         lsu_cdb_exc_cause = (amo_op_r == AMO_LR) ? MCAUSE_LOAD_FAULT : MCAUSE_STORE_FAULT;
         lsu_cdb_exc_tval  = amo_addr_r;
-    end else if (amo_addr_misalign && !amo_in_flight && !amo_done && !flush) begin
-        // Misaligned ROB-head LR.W / SC.W / AMO*.W -> report exception without D$ issue!
+    end else if ((amo_addr_misalign || amo_addr_is_mmio) && !amo_in_flight && !amo_done && !flush) begin
+        // Misaligned OR uncached-MMIO ROB-head LR.W / SC.W / AMO*.W -> trap without D$ issue!
         lsu_cdb_valid     = 1'b1;
         cdb_sel_kind      = 2'd0;
         lsu_cdb_tag       = amo_req_tag;
@@ -640,7 +687,9 @@ always @(*) begin
         lsu_cdb_mem_wstrb = 4'd0;
         lsu_cdb_mem_wdata = 32'd0;
         lsu_cdb_exc_valid = 1'b1;
-        lsu_cdb_exc_cause = (amo_req_op == AMO_LR) ? MCAUSE_LOAD_MISALIGN : MCAUSE_STORE_MISALIGN;
+        lsu_cdb_exc_cause = amo_addr_misalign
+                          ? ((amo_req_op == AMO_LR) ? MCAUSE_LOAD_MISALIGN : MCAUSE_STORE_MISALIGN)
+                          : ((amo_req_op == AMO_LR) ? MCAUSE_LOAD_FAULT    : MCAUSE_STORE_FAULT);
         lsu_cdb_exc_tval  = amo_req_addr;
     end else begin
         for (li3 = 0; li3 < LQ_DEPTH; li3 = li3 + 1) begin
@@ -669,10 +718,11 @@ always @(*) begin
                 if (si3[3:0] < (sq_tail - sq_commit_ptr)) begin
                     sq_scan_ptr = sq_commit_ptr + si3[3:0];
                     sq_scan_idx = sq_scan_ptr[2:0];
-                    if (!lsu_cdb_valid && sq_addr_valid[sq_scan_idx] &&
-                        (!sq_qk_valid[sq_scan_idx] ||
-                         is_mem_misaligned(sq_size[sq_scan_idx], sq_addr_eff[sq_scan_idx][1:0])) &&
-                        !sq_cdb_sent[sq_scan_idx]) begin
+                    if (!lsu_cdb_valid && sq_addr_valid[sq_scan_idx] && !sq_cdb_sent[sq_scan_idx] &&
+                        (is_mem_misaligned(sq_size[sq_scan_idx], sq_addr_eff[sq_scan_idx][1:0]) ||
+                         (!sq_qk_valid[sq_scan_idx] &&
+                          (!is_mmio_addr(sq_addr_eff[sq_scan_idx]) ||
+                           (mmio_st_done && (sq_scan_idx == sq_commit_idx)))))) begin
                         lsu_cdb_valid     = 1'b1;
                         cdb_sel_kind      = 2'd3;
                         cdb_sel_st_idx    = sq_scan_idx;
@@ -686,6 +736,13 @@ always @(*) begin
                             lsu_cdb_mem_wdata = 32'd0;
                             lsu_cdb_exc_valid = 1'b1;
                             lsu_cdb_exc_cause = MCAUSE_STORE_MISALIGN;
+                            lsu_cdb_exc_tval  = sq_addr_eff[sq_scan_idx];
+                        end else if (is_mmio_addr(sq_addr_eff[sq_scan_idx]) && mmio_st_err) begin
+                            lsu_cdb_mem_we    = 1'b0;
+                            lsu_cdb_mem_wstrb = 4'd0;
+                            lsu_cdb_mem_wdata = 32'd0;
+                            lsu_cdb_exc_valid = 1'b1;
+                            lsu_cdb_exc_cause = MCAUSE_STORE_FAULT;
                             lsu_cdb_exc_tval  = sq_addr_eff[sq_scan_idx];
                         end else begin
                             lsu_cdb_mem_we    = 1'b1;
@@ -725,15 +782,19 @@ always @(posedge clk or negedge reset_n) begin
         sq_head       <= 4'd0;
         sq_commit_ptr <= 4'd0;
         sq_tail       <= 4'd0;
-        amo_in_flight <= 1'b0;
-        amo_done      <= 1'b0;
-        amo_exc_r     <= 1'b0;
-        amo_op_r      <= AMO_NONE;
-        amo_tag_r     <= {TAG_W{1'b0}};
-        amo_seq_r     <= 32'd0;
-        amo_addr_r    <= 32'd0;
-        amo_rs2_r     <= 32'd0;
-        amo_rdata_r   <= 32'd0;
+        amo_in_flight     <= 1'b0;
+        amo_done          <= 1'b0;
+        amo_exc_r         <= 1'b0;
+        amo_op_r          <= AMO_NONE;
+        amo_tag_r         <= {TAG_W{1'b0}};
+        amo_seq_r         <= 32'd0;
+        amo_addr_r        <= 32'd0;
+        amo_rs2_r         <= 32'd0;
+        amo_rdata_r       <= 32'd0;
+        mmio_ld_in_flight <= 1'b0;
+        mmio_st_in_flight <= 1'b0;
+        mmio_st_done      <= 1'b0;
+        mmio_st_err       <= 1'b0;
         for (k = 0; k < SQ_DEPTH; k = k + 1) begin
             sq_rob_tag[k]    <= {TAG_W{1'b0}};
             sq_seq_id[k]     <= 32'd0;
@@ -749,6 +810,7 @@ always @(posedge clk or negedge reset_n) begin
             sq_qk_valid[k]   <= 1'b0;
             sq_qk_byp[k]     <= BYP_NONE;
             sq_cdb_sent[k]   <= 1'b0;
+            sq_mmio_sent[k]  <= 1'b0;
         end
         for (k = 0; k < LQ_DEPTH; k = k + 1) begin
             lq_valid[k]      <= 1'b0;
@@ -773,9 +835,12 @@ always @(posedge clk or negedge reset_n) begin
             lq_data[k]       <= 32'd0;
         end
     end else begin
-        // A. Split-Transaction D-Cache Handshake & Dual Response Capture
+        // A. Split-Transaction D-Cache / APB4 MMIO Handshake & Dual Response Capture
         if (dc_st_fire) begin
             sq_head <= sq_head + 4'd1;
+        end else if (dc_mmio_st_fire) begin
+            mmio_st_in_flight           <= 1'b1;
+            sq_mmio_sent[sq_commit_idx] <= 1'b1;
         end else if (dc_amo_fire) begin
             amo_in_flight <= 1'b1;
             amo_exc_r     <= 1'b0;
@@ -787,20 +852,28 @@ always @(posedge clk or negedge reset_n) begin
         end else if (dc_ld_fire) begin
             lq_issued[cache_ld_pick_idx]    <= 1'b1;
             lq_from_stlf[cache_ld_pick_idx] <= 1'b0;
+            if (dc_req_is_mmio)
+                mmio_ld_in_flight <= 1'b1;
         end
 
         if (!flush) begin
-            if (dc_hit_is_amo && amo_in_flight) begin
+            if (dc_hit_is_mmio_st && mmio_st_in_flight) begin
+                mmio_st_in_flight <= 1'b0;
+                mmio_st_done      <= 1'b1;
+                mmio_st_err       <= dc_hit_err;
+            end else if (dc_hit_is_amo && amo_in_flight) begin
                 amo_in_flight <= 1'b0;
                 amo_done      <= 1'b1;
                 amo_exc_r     <= dc_hit_err;
                 amo_rdata_r   <= dc_hit_rdata;
-            end else if (dc_hit_valid && !dc_hit_is_amo && lq_valid[hit_idx] &&
+            end else if (dc_hit_is_load && lq_valid[hit_idx] &&
                          lq_issued[hit_idx] && (hit_gen == lq_gen[hit_idx])) begin
                 lq_done[hit_idx] <= 1'b1;
                 lq_exc[hit_idx]  <= dc_hit_err;
                 lq_data[hit_idx] <= format_load_data(lq_size[hit_idx], lq_uns[hit_idx],
                                                      lq_addr_eff[hit_idx][1:0], dc_hit_rdata);
+                if (mmio_ld_in_flight)
+                    mmio_ld_in_flight <= 1'b0;
             end
 
             if (dc_fill_is_amo && amo_in_flight) begin
@@ -808,7 +881,7 @@ always @(posedge clk or negedge reset_n) begin
                 amo_done      <= 1'b1;
                 amo_exc_r     <= dc_fill_err;
                 amo_rdata_r   <= dc_fill_rdata;
-            end else if (dc_fill_valid && !dc_fill_is_amo && lq_valid[fill_idx] &&
+            end else if (dc_fill_is_load && lq_valid[fill_idx] &&
                          lq_issued[fill_idx] && (fill_gen == lq_gen[fill_idx])) begin
                 lq_done[fill_idx] <= 1'b1;
                 lq_exc[fill_idx]  <= dc_fill_err;
@@ -819,10 +892,14 @@ always @(posedge clk or negedge reset_n) begin
 
         // B. Queue updates
         if (flush) begin
-            sq_tail       <= sq_commit_ptr;
-            amo_in_flight <= 1'b0;
-            amo_done      <= 1'b0;
-            amo_exc_r     <= 1'b0;
+            sq_tail           <= sq_commit_ptr;
+            amo_in_flight     <= 1'b0;
+            amo_done          <= 1'b0;
+            amo_exc_r         <= 1'b0;
+            mmio_ld_in_flight <= 1'b0;
+            mmio_st_in_flight <= 1'b0;
+            mmio_st_done      <= 1'b0;
+            mmio_st_err       <= 1'b0;
             for (k = 0; k < LQ_DEPTH; k = k + 1) begin
                 if (lq_valid[k]) lq_gen[k] <= lq_gen[k] + 3'd1;
                 lq_valid[k]    <= 1'b0;
@@ -945,12 +1022,21 @@ always @(posedge clk or negedge reset_n) begin
                     lq_cdb_sent[cdb_sel_ld_idx] <= 1'b1;
                 end else if (cdb_sel_kind == 2'd3) begin
                     sq_cdb_sent[cdb_sel_st_idx] <= 1'b1;
+                    if (mmio_st_done && (cdb_sel_st_idx == sq_commit_idx)) begin
+                        mmio_st_done <= 1'b0;
+                        mmio_st_err  <= 1'b0;
+                    end
                 end
             end
 
             // 4. ROB Commit: free committed Load entries & advance committed Store ptr
-            if (rob_commit_store)
+            //    Note: synchronous MMIO stores already executed on APB4 before commit
+            //    (with sq_head == sq_commit_ptr), so advance BOTH pointers together!
+            if (rob_commit_store) begin
                 sq_commit_ptr <= sq_commit_ptr + 4'd1;
+                if (sq_mmio_sent[sq_commit_idx])
+                    sq_head <= sq_head + 4'd1;
+            end
 
             for (k = 0; k < LQ_DEPTH; k = k + 1) begin
                 if (lq_valid[k] &&
@@ -1017,6 +1103,7 @@ always @(posedge clk or negedge reset_n) begin
                 sq_qk_valid[sq_tail_idx]   <= disp_qk_v_eff;
                 sq_qk_byp[sq_tail_idx]     <= disp_qkbyp_e;
                 sq_cdb_sent[sq_tail_idx]   <= 1'b0;
+                sq_mmio_sent[sq_tail_idx]  <= 1'b0;
                 sq_tail                    <= sq_tail + 4'd1;
             end
         end

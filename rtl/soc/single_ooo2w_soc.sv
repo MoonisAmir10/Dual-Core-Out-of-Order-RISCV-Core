@@ -103,25 +103,48 @@ localparam integer ID_W      = 7;
 localparam integer LADDR_W   = AWIDTH - 4; // 16
 localparam integer LINE_BITS = DRAM_LINE_BITS;
 
+`include "soc_addr_map.vh"
+localparam integer APB_NUM_SLAVES = 7;
+localparam [15:0]  APB_SLV_MASK   = 16'b0000_0000_0100_0001; // S0=CLINT, S6=SOC_CTRL
+
 // Core <-> L1I
 wire        imem_req_valid, imem_valid0, imem_valid1;
 wire [31:0] imem_pc0, imem_instr0, imem_pc1, imem_instr1;
 wire        ic_flush, ic_invalidate_all, ic_idle_u;
 wire        ic_hit_p, ic_miss_p, ic_pf_hit_p, ic_stall_u;
 
-// Core <-> L1D / Uncached CLINT MMIO Bypass
+// Core <-> L1D / Standardized AMBA APB4 Uncached MMIO Fabric
 wire        core_dc_valid, core_dc_ready, core_dc_we, core_dc_is_mmio;
 wire [3:0]  core_dc_amo_op;
 wire [AWIDTH-1:0] core_dc_addr;
+wire [31:0] core_dc_paddr;
 wire [31:0] core_dc_wdata;
 wire [3:0]  core_dc_wstrb;
 wire [ID_W-1:0] core_dc_id;
 wire [4:0]  core_dc_rob_tag;
 
 wire        dc_req_ready, mmio_req_ready;
-wire        dc_hit_valid, mmio_resp_valid, dc_fill_valid;
+wire        dc_hit_valid, mmio_resp_valid, mmio_resp_err, dc_fill_valid;
 wire [ID_W-1:0] dc_hit_id, mmio_resp_id, dc_fill_id;
 wire [31:0] dc_hit_rdata, mmio_resp_rdata, dc_fill_rdata;
+
+wire        apb_m_psel, apb_m_penable, apb_m_pwrite, apb_m_pready, apb_m_pslverr;
+wire [31:0] apb_m_paddr, apb_m_pwdata, apb_m_prdata;
+wire [3:0]  apb_m_pstrb;
+wire [APB_NUM_SLAVES-1:0]    apb_s_psel, apb_s_pready, apb_s_pslverr;
+wire [APB_NUM_SLAVES*32-1:0] apb_s_prdata;
+wire        apb_s_penable, apb_s_pwrite;
+wire [31:0] apb_s_paddr, apb_s_pwdata;
+wire [3:0]  apb_s_pstrb;
+
+wire        clint_mtip0_u, clint_mtip1_u;
+wire        core_halted, soc_sys_halt;
+wire [31:0] soc_tohost_u;
+wire        c1_mmio_rdy_u, c1_mmio_rv_u, c1_mmio_err_u;
+wire [ID_W-1:0] c1_mmio_rid_u;
+wire [31:0] c1_mmio_rd_u;
+
+assign halted = core_halted || soc_sys_halt;
 
 wire        dc_flush, dc_squash_valid, dc_clean_req, dc_clean_done;
 wire [4:0]  dc_squash_tag, dc_rob_head;
@@ -130,10 +153,11 @@ wire        dc_hit_p, dc_miss_p, dc_wb_p, dc_hum_p, dc_mum_p, dc_coal_u;
 
 assign core_dc_ready = core_dc_is_mmio ? mmio_req_ready : dc_req_ready;
 
-// Guaranteed mutually exclusive (MMIO & D$ reqs never fire on the same cycle!)
+// Guaranteed mutually exclusive (LSQ holds younger cacheable loads while APB4 MMIO is active!)
 wire            core_hit_valid = mmio_resp_valid || dc_hit_valid;
 wire [ID_W-1:0] core_hit_id    = mmio_resp_valid ? mmio_resp_id    : dc_hit_id;
 wire [31:0]     core_hit_rdata = mmio_resp_valid ? mmio_resp_rdata : dc_hit_rdata;
+wire            core_hit_err   = mmio_resp_valid ? mmio_resp_err   : 1'b0;
 
 // L1D <-> L2 Master 0 & L1I <-> L2 Master 1
 wire        dc_rd_valid, dc_rd_ready, dc_rd_id;
@@ -186,7 +210,9 @@ ooo2w_core #(
     .CORE_ID(CORE_ID),
     .RESET_PC(32'd0),
     .AWIDTH(AWIDTH),
-    .ID_W(ID_W)
+    .ID_W(ID_W),
+    .ENABLE_MMIO_PMA(1),
+    .RAM_SIZE_BYTES(SOC_RAM_SIZE)
 ) u_core (
     .clk(clk), .reset_n(reset_n),
     .imem_req_valid(imem_req_valid),
@@ -196,9 +222,9 @@ ooo2w_core #(
     .dc_req_valid(core_dc_valid), .dc_req_ready(core_dc_ready),
     .dc_req_is_write(core_dc_we), .dc_req_is_mmio(core_dc_is_mmio),
     .dc_req_amo_op(core_dc_amo_op),
-    .dc_req_addr(core_dc_addr), .dc_req_wdata(core_dc_wdata), .dc_req_wstrb(core_dc_wstrb),
+    .dc_req_addr(core_dc_addr), .dc_req_paddr(core_dc_paddr), .dc_req_wdata(core_dc_wdata), .dc_req_wstrb(core_dc_wstrb),
     .dc_req_id(core_dc_id), .dc_req_rob_tag(core_dc_rob_tag),
-    .dc_hit_valid(core_hit_valid), .dc_hit_id(core_hit_id), .dc_hit_rdata(core_hit_rdata), .dc_hit_err(1'b0),
+    .dc_hit_valid(core_hit_valid), .dc_hit_id(core_hit_id), .dc_hit_rdata(core_hit_rdata), .dc_hit_err(core_hit_err),
     .dc_fill_valid(dc_fill_valid), .dc_fill_id(dc_fill_id), .dc_fill_rdata(dc_fill_rdata), .dc_fill_err(1'b0),
     .dc_flush(dc_flush), .dc_squash_valid(dc_squash_valid),
     .dc_squash_tag(dc_squash_tag), .dc_rob_head(dc_rob_head),
@@ -223,7 +249,7 @@ ooo2w_core #(
     .trace_issue_valid(trace_issue_valid), .trace_issue_seq(trace_issue_seq),
     .trace_cdb_valid(trace_cdb_valid), .trace_cdb_seq(trace_cdb_seq),
     .trace_flush_valid(trace_flush_valid), .trace_flush_after_seq(trace_flush_after_seq),
-    .halted(halted), .x14(x14),
+    .halted(core_halted), .x14(x14),
     .stat_rob_full_stall(st_u0), .stat_rs_full_stall(st_u1),
     .stat_lsq_full_stall(st_u2), .stat_cp_full_stall(st_u3),
     .stat_stlf_hit(st_u4),
@@ -281,13 +307,84 @@ dcache_nb #(
     .cache_hum(dc_hum_p), .cache_mum_cyc(dc_mum_p), .cache_mshr_coalesce(dc_coal_u)
 );
 
-clint_mmio #(.ID_W(ID_W)) u_clint (
+// Standardized AMBA APB4 Peripheral Fabric (Phase U2: S0=CLINT, S6=SoC Ctrl)
+mmio_to_apb4_bridge #(.ID_W(ID_W)) u_apb_bridge (
     .clk(clk), .reset_n(reset_n),
-    .req_valid(core_dc_valid && core_dc_is_mmio), .req_ready(mmio_req_ready),
-    .req_is_write(core_dc_we), .req_offset(core_dc_addr[15:0]),
-    .req_wdata(core_dc_wdata), .req_wstrb(core_dc_wstrb), .req_id(core_dc_id),
-    .resp_valid(mmio_resp_valid), .resp_id(mmio_resp_id), .resp_rdata(mmio_resp_rdata),
-    .msip0_out(clint_msip0), .msip1_out(clint_msip1), .mtime_out(clint_mtime_u)
+    .c0_req_valid(core_dc_valid && core_dc_is_mmio), .c0_req_ready(mmio_req_ready),
+    .c0_req_is_write(core_dc_we), .c0_req_addr(core_dc_paddr),
+    .c0_req_wdata(core_dc_wdata), .c0_req_wstrb(core_dc_wstrb), .c0_req_id(core_dc_id),
+    .c0_resp_valid(mmio_resp_valid), .c0_resp_id(mmio_resp_id),
+    .c0_resp_rdata(mmio_resp_rdata), .c0_resp_err(mmio_resp_err),
+    .c1_req_valid(1'b0), .c1_req_ready(c1_mmio_rdy_u),
+    .c1_req_is_write(1'b0), .c1_req_addr(32'd0),
+    .c1_req_wdata(32'd0), .c1_req_wstrb(4'd0), .c1_req_id({ID_W{1'b0}}),
+    .c1_resp_valid(c1_mmio_rv_u), .c1_resp_id(c1_mmio_rid_u),
+    .c1_resp_rdata(c1_mmio_rd_u), .c1_resp_err(c1_mmio_err_u),
+    .m_psel(apb_m_psel), .m_penable(apb_m_penable), .m_pwrite(apb_m_pwrite),
+    .m_paddr(apb_m_paddr), .m_pwdata(apb_m_pwdata), .m_pstrb(apb_m_pstrb),
+    .m_pready(apb_m_pready), .m_prdata(apb_m_prdata), .m_pslverr(apb_m_pslverr)
+);
+
+assign apb_s_pready[APB_SLV_PLIC]       = 1'b1;
+assign apb_s_pslverr[APB_SLV_PLIC]      = 1'b1;
+assign apb_s_prdata[APB_SLV_PLIC*32  +: 32] = 32'd0;
+assign apb_s_pready[APB_SLV_GPIO]       = 1'b1;
+assign apb_s_pslverr[APB_SLV_GPIO]      = 1'b1;
+assign apb_s_prdata[APB_SLV_GPIO*32  +: 32] = 32'd0;
+assign apb_s_pready[APB_SLV_UART]       = 1'b1;
+assign apb_s_pslverr[APB_SLV_UART]      = 1'b1;
+assign apb_s_prdata[APB_SLV_UART*32  +: 32] = 32'd0;
+assign apb_s_pready[APB_SLV_DMA]        = 1'b1;
+assign apb_s_pslverr[APB_SLV_DMA]       = 1'b1;
+assign apb_s_prdata[APB_SLV_DMA*32   +: 32] = 32'd0;
+assign apb_s_pready[APB_SLV_TIMER]      = 1'b1;
+assign apb_s_pslverr[APB_SLV_TIMER]     = 1'b1;
+assign apb_s_prdata[APB_SLV_TIMER*32 +: 32] = 32'd0;
+
+apb4_interconnect #(
+    .NUM_SLAVES(APB_NUM_SLAVES),
+    .SLAVE_PRESENT(APB_SLV_MASK)
+) u_apb_xbar (
+    .m_psel(apb_m_psel), .m_penable(apb_m_penable), .m_pwrite(apb_m_pwrite),
+    .m_paddr(apb_m_paddr), .m_pwdata(apb_m_pwdata), .m_pstrb(apb_m_pstrb),
+    .m_pready(apb_m_pready), .m_prdata(apb_m_prdata), .m_pslverr(apb_m_pslverr),
+    .s_psel(apb_s_psel), .s_penable(apb_s_penable), .s_pwrite(apb_s_pwrite),
+    .s_paddr(apb_s_paddr), .s_pwdata(apb_s_pwdata), .s_pstrb(apb_s_pstrb),
+    .s_pready(apb_s_pready), .s_prdata(apb_s_prdata), .s_pslverr(apb_s_pslverr)
+);
+
+apb4_clint u_clint (
+    .pclk(clk), .preset_n(reset_n),
+    .psel(apb_s_psel[APB_SLV_CLINT]), .penable(apb_s_penable), .pwrite(apb_s_pwrite),
+    .paddr(apb_s_paddr), .pwdata(apb_s_pwdata), .pstrb(apb_s_pstrb),
+    .pready(apb_s_pready[APB_SLV_CLINT]),
+    .prdata(apb_s_prdata[APB_SLV_CLINT*32 +: 32]),
+    .pslverr(apb_s_pslverr[APB_SLV_CLINT]),
+    .msip0_out(clint_msip0), .msip1_out(clint_msip1),
+    .mtip0_out(clint_mtip0_u), .mtip1_out(clint_mtip1_u), .mtime_out(clint_mtime_u)
+);
+
+apb4_soc_ctrl #(
+    .SOC_ID(32'h2002_0002),
+    .NUM_CORES(32'd1),
+    .FEATURE_MASK(32'h0000_0003)
+) u_soc_ctrl (
+    .pclk(clk), .preset_n(reset_n),
+    .psel(apb_s_psel[APB_SLV_SOC_CTRL]), .penable(apb_s_penable), .pwrite(apb_s_pwrite),
+    .paddr(apb_s_paddr), .pwdata(apb_s_pwdata), .pstrb(apb_s_pstrb),
+    .pready(apb_s_pready[APB_SLV_SOC_CTRL]),
+    .prdata(apb_s_prdata[APB_SLV_SOC_CTRL*32 +: 32]),
+    .pslverr(apb_s_pslverr[APB_SLV_SOC_CTRL]),
+    .pmu_cycles_in(pmu_cycles),
+    .pmu_c0_instret_in(pmu_instret),
+    .pmu_c1_instret_in(32'd0),
+    .pmu_coh_c2c_in(32'd0),
+    .pmu_l2_hits_in(pmu_l2_hits),
+    .pmu_l2_misses_in(pmu_l2_misses),
+    .pmu_dram_rds_in(pmu_dram_rds),
+    .pmu_dram_wrs_in(pmu_dram_wrs),
+    .sys_halt_out(soc_sys_halt),
+    .tohost_out(soc_tohost_u)
 );
 
 l2_cache_shared #(

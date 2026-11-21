@@ -33,7 +33,12 @@ from typing import Dict, List, Tuple
 ROOT = Path(__file__).resolve().parent.parent
 BUILD = ROOT / "build" / "phase7_synth"
 YOSYS = "/home/moonis/auto_job_seeker/.eda_tools/envs/dft/bin/yosys"
-INC = f"-I{ROOT / 'rtl' / 'common'} -I{ROOT / 'rtl' / 'coherence'}"
+INC = f"-I{ROOT / 'rtl' / 'common'} -I{ROOT / 'rtl' / 'coherence'} -I{ROOT / 'rtl' / 'soc'}"
+
+RTL_APB = [
+    "rtl/bus/mmio_to_apb4_bridge.sv", "rtl/bus/apb4_interconnect.sv",
+    "rtl/periph/apb4_clint.sv", "rtl/periph/apb4_soc_ctrl.sv",
+]
 
 RTL_COMMON = [
     "rtl/common/alu.v", "rtl/common/branch_comp.v", "rtl/common/imm_gen.v",
@@ -83,14 +88,17 @@ SYNTH_UNITS: List[Tuple[str, str, List[str], str, int, int, str, str]] = [
     ("dcache_nb_coh",    "dcache_nb_coh",    ["rtl/coherence/dcache_nb_coh.sv"], "-chparam NUM_SETS 8", 0, 2, "l1", "2C MOESI L1D+DupTag+2MSHR+2WBB+AMO (8s; 4KB arch)"),
     ("coh_interconnect", "coh_interconnect", ["rtl/coherence/coh_interconnect.sv"], "", 0, 1, "uncore", "3-Channel Split-Tx MOESI Snooping Crossbar"),
     ("l2_cache_shared",  "l2_cache_shared",  ["rtl/mem/l2_bank.sv", "rtl/mem/l2_cache_shared.sv"], "-chparam SETS_PER_BANK 8", 1, 1, "uncore", "Shared 2-Bank 4-Way NINE L2 (8s/b; 32KB arch)"),
-    ("clint_mmio",       "clint_mmio",       ["rtl/soc/clint_mmio.sv"],        "", 1, 1, "uncore", "Uncached CLINT MMIO Hub (mtime, msip0/1, scratch)"),
+    ("apb4_bridge",      "mmio_to_apb4_bridge", ["rtl/bus/mmio_to_apb4_bridge.sv"], "", 1, 1, "uncore", "2-to-1 RR Core MMIO -> AMBA APB4 Master Bridge"),
+    ("apb4_xbar",        "apb4_interconnect",   ["rtl/bus/apb4_interconnect.sv"],   "", 1, 1, "uncore", "Expandable AMBA APB4 Decoder/Mux (NUM_SLAVES=7)"),
+    ("apb4_clint",       "apb4_clint",          ["rtl/periph/apb4_clint.sv"],       "", 1, 1, "uncore", "AMBA APB4 CLINT (mtime, mtimecmp0/1, msip0/1)"),
+    ("apb4_soc_ctrl",    "apb4_soc_ctrl",       ["rtl/periph/apb4_soc_ctrl.sv"],    "", 1, 1, "uncore", "AMBA APB4 SoC Ctrl, TOHOST/HALT & Live PMU"),
 ]
 
 FULL_SOC_LOOP_AUDITS: List[Tuple[str, str, List[str], str]] = [
     ("ooo2w_core",       "ooo2w_core",       RTL_COMMON + RTL_CORE, ""),
-    ("single_ooo2w_soc", "single_ooo2w_soc", RTL_COMMON + RTL_MEM + RTL_CORE + ["rtl/soc/clint_mmio.sv", "rtl/soc/single_ooo2w_soc.sv"],
+    ("single_ooo2w_soc", "single_ooo2w_soc", RTL_COMMON + RTL_MEM + RTL_CORE + RTL_APB + ["rtl/soc/single_ooo2w_soc.sv"],
      "-chparam ICACHE_SETS 8 -chparam DCACHE_SETS 8 -chparam L2_SETS_BANK 8 -chparam DRAM_LINE_BITS 4"),
-    ("dual_ooo2w_soc",   "dual_ooo2w_soc",   RTL_COMMON + RTL_MEM + RTL_COH + RTL_CORE + ["rtl/soc/clint_mmio.sv", "rtl/soc/dual_ooo2w_soc.sv"],
+    ("dual_ooo2w_soc",   "dual_ooo2w_soc",   RTL_COMMON + RTL_MEM + RTL_COH + RTL_CORE + RTL_APB + ["rtl/soc/dual_ooo2w_soc.sv"],
      "-chparam ICACHE_SETS 8 -chparam DCACHE_SETS 8 -chparam L2_SETS_BANK 8 -chparam DRAM_LINE_BITS 4"),
 ]
 

@@ -94,6 +94,7 @@ wire         imem_req_u, ic_flush_u, ic_inv_u;
 wire         dc_req_valid, dc_req_ready, dc_req_is_write, dc_req_mmio_u;
 wire [3:0]   dc_req_amo_op;
 wire [15:0]  dc_req_addr;
+wire [31:0]  dc_req_paddr_u;
 wire [31:0]  dc_req_wdata;
 wire [3:0]   dc_req_wstrb;
 wire [6:0]   dc_req_id;
@@ -137,7 +138,8 @@ ooo2w_core #(
     .CORE_ID(32'd0),
     .RESET_PC(32'd0),
     .AWIDTH(16),
-    .ID_W(7)
+    .ID_W(7),
+    .ENABLE_MMIO_PMA(0)
 ) u_core (
     .clk(clk), .reset_n(reset_n),
     .imem_req_valid(imem_req_u),
@@ -147,7 +149,7 @@ ooo2w_core #(
     .dc_req_valid(dc_req_valid), .dc_req_ready(dc_req_ready),
     .dc_req_is_write(dc_req_is_write), .dc_req_is_mmio(dc_req_mmio_u),
     .dc_req_amo_op(dc_req_amo_op),
-    .dc_req_addr(dc_req_addr), .dc_req_wdata(dc_req_wdata), .dc_req_wstrb(dc_req_wstrb),
+    .dc_req_addr(dc_req_addr), .dc_req_paddr(dc_req_paddr_u), .dc_req_wdata(dc_req_wdata), .dc_req_wstrb(dc_req_wstrb),
     .dc_req_id(dc_req_id), .dc_req_rob_tag(dc_req_rob_tag),
     .dc_hit_valid(dc_hit_valid), .dc_hit_id(dc_hit_id), .dc_hit_rdata(dc_hit_rdata), .dc_hit_err(1'b0),
     .dc_fill_valid(dc_fill_valid), .dc_fill_id(dc_fill_id), .dc_fill_rdata(dc_fill_rdata), .dc_fill_err(1'b0),

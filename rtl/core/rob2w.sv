@@ -107,6 +107,7 @@ module rob2w #(
     // External commit readiness, replay & M-mode trap/interrupt inputs
     input  wire             halted_in,
     input  wire             lsq_sq_empty,      // sq_empty && dc_writes_idle
+    input  wire             lsq_mmio_busy,     // Active non-speculative APB4 MMIO op in flight!
     input  wire             fence_i_ready,     // D$ dirty clean-all finished for FENCE.I
     input  wire             lsq_head0_replay,  // Speculative load at h0 was snoop-invalidated!
     input  wire             lsq_head1_replay,  // Speculative load at h1 was snoop-invalidated!
@@ -296,8 +297,8 @@ wire        h0_has_exc       = e_exc_valid[h0] || h0_ebreak_trap;
 wire [3:0]  h0_exc_cause_eff = e_exc_valid[h0] ? e_exc_cause[h0] : MCAUSE_BREAKPOINT;
 wire [31:0] h0_exc_tval_eff  = e_exc_valid[h0] ? e_exc_tval[h0]  : e_pc[h0];
 
-// Asynchronous M-Mode Interrupt (Priority 2: defer 1 insn across in-flight CSR/AMO/FENCE.I)
-wire h0_irq_block = irq_pending && !e_is_amo[h0] && !e_is_fence_i[h0] && !e_is_csr[h0];
+// Asynchronous M-Mode Interrupt (Priority 2: defer 1 insn across in-flight CSR/AMO/FENCE.I/MMIO)
+wire h0_irq_block = irq_pending && !e_is_amo[h0] && !e_is_fence_i[h0] && !e_is_csr[h0] && !lsq_mmio_busy;
 wire h0_irq_fire  = head_valid && !h0_replay_fire && h0_irq_block && lsq_sq_empty;
 
 // Precise Synchronous Exception at ROB head (Priority 3: drain older stores first!)

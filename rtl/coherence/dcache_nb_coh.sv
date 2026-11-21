@@ -391,13 +391,17 @@ always @(*) begin
                     snp_next_state = COH_I;
                 end
             endcase
-        end else if (snp_hit_wbb) begin
-            // Dirty line sitting in our WBB (MI_A / OI_A): supply C2C data on GetS/GetM!
-            // On Upgrade, peer already has identical data in S -> cancel stale WBB!
+        end
+        // NOTE: During FENCE.I clean-all (M->E / O->S + WBB push), a line can be
+        // BOTH resident in cache (clean E/S) AND still dirty-pending in WBB!
+        // Until WBB drains to L2, WBB holds the sole authoritative dirty copy,
+        // so GetS/GetM MUST supply SNP_RESP_DATA from WBB (while cache way still
+        // transitions E->S on GetS or E/S->I on GetM/Upgrade, and WBB cancels on inv)!
+        if (snp_hit_wbb) begin
             if (snp_is_gets || snp_is_getm) begin
                 snoop_resp_op   = SNP_RESP_DATA;
                 snoop_resp_data = snp_wbb_data;
-            end else begin
+            end else if (!snp_hit_c) begin
                 snoop_resp_op   = SNP_RESP_INVACK;
             end
         end
